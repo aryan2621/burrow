@@ -38,5 +38,8 @@ After `events.subscribe` a connection receives `chat.delta`, `chat.tool`, `chat.
 - **Undo:** file writes/deletes snapshot first; undo refuses if the file changed since (unless forced). Shell/fetch are marked irreversible.
 - **Approvals:** default allow for list/read/write (undoable), ask for delete, shell and new domains. "Always allow" saves a rule or adds the domain.
 - **Kill switch:** stops the run, denies its pending approvals, removes its sandbox.
+- **Injection guard:** after `http_fetch`, `web_search` or an MCP tool, write/delete/shell/notes_add (and non-read-only MCP tools) ask for the rest of the run.
+- **Limits:** 10 steps, 30 minutes, 32k output tokens per run. Schedules wait while on battery under 20%.
+- **At rest:** SQLCipher DB and ChaCha20-Poly1305 undo snapshots (key in the keychain); scratch folders are plaintext. Crash reports go to `~/.burrow/crashes/`, local only.
 
 Not yet: rootless Podman networking on Linux, secret injection into sandbox traffic (needs TLS interception, v0.2).

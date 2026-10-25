@@ -141,15 +141,28 @@ pub async fn run(st: Arc<State>) {
     let changes = Arc::new(Changes::default());
     let mut watchers: HashMap<i64, (String, notify::RecommendedWatcher)> = HashMap::new();
     loop {
-        if let Err(e) = tick(&st).await {
-            eprintln!("scheduler: {e:#}");
+        // due schedules and file changes keep waiting and fire once power is back
+        let low = tokio::task::spawn_blocking(low_battery).await.unwrap_or(false);
+        if !low {
+            if let Err(e) = tick(&st).await {
+                eprintln!("scheduler: {e:#}");
+            }
         }
         if let Err(e) = sync_watchers(&st, &changes, &mut watchers).await {
             eprintln!("scheduler: {e:#}");
         }
-        fire_file_changes(&st, &changes).await;
+        if !low {
+            fire_file_changes(&st, &changes).await;
+        }
         tokio::time::sleep(TICK).await;
     }
+}
+
+/// Discharging below 20%: background runs wait. Desktops and unreadable batteries count as fine.
+fn low_battery() -> bool {
+    let Ok(m) = starship_battery::Manager::new() else { return false };
+    let Ok(bs) = m.batteries() else { return false };
+    bs.flatten().any(|b| b.state() == starship_battery::State::Discharging && b.state_of_charge().value < 0.2)
 }
 
 async fn sync_watchers(st: &Arc<State>, changes: &Arc<Changes>, watchers: &mut HashMap<i64, (String, notify::RecommendedWatcher)>) -> Result<()> {

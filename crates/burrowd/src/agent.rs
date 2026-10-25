@@ -7,6 +7,7 @@ use crate::secrets::{self, Vault};
 use crate::{compact, fetch, journal, mcp, models, notes, proxy, search, store, tools};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -16,6 +17,13 @@ use tokio::sync::{broadcast, oneshot};
 use tokio::task::AbortHandle;
 
 const MAX_STEPS: usize = 10;
+/// Runaway limits per run, checked before each model call (a pending approval doesn't get cut off).
+const MAX_RUN_SECS: u64 = 30 * 60;
+const MAX_RUN_OUTPUT_TOKENS: i64 = 32_000;
+/// Tools whose output is outside content; after one runs, side effects need approval.
+fn brings_untrusted(tool: &str) -> bool {
+    matches!(tool, "http_fetch" | "web_search") || tool.starts_with("mcp__")
+}
 const SHELL_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct State {
@@ -44,7 +52,9 @@ pub struct State {
 impl State {
     /// An empty `llama_url` means the daemon runs llama-server itself.
     pub async fn new(home: PathBuf, ollama_url: String, llama_url: String, sandbox: Sandbox, vault: Vault) -> Result<Self> {
-        let db = store::open(&home.join("burrow.db"), &vault.db_key().await?).await?;
+        let key = vault.db_key().await?;
+        let db = store::open(&home.join("burrow.db"), &key).await?;
+        let _ = journal::SNAP_KEY.set(Sha256::digest(format!("snapshots:{key}")).into());
         store::recover(&db).await?;
         // Ollama doesn't report its parallelism over the API, so it's configured to match OLLAMA_NUM_PARALLEL.
         let slots = |k: &str, d: usize| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
@@ -168,7 +178,17 @@ pub async fn run(st: Arc<State>, agent_id: i64, text: &str, prio: Priority, trig
     let specs = Value::from(specs);
 
     store::add_message(&st.db, agent_id, &json!({"role": "user", "content": text})).await?;
+    let t0 = std::time::Instant::now();
+    let mut tainted = false;
     for _ in 0..MAX_STEPS {
+        if t0.elapsed().as_secs() > MAX_RUN_SECS {
+            bail!("stopped after {} minutes", MAX_RUN_SECS / 60);
+        }
+        let out: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(completion_tokens), 0) FROM model_calls WHERE run_id = ?")
+            .bind(run_id).fetch_one(&st.db).await?;
+        if out > MAX_RUN_OUTPUT_TOKENS {
+            bail!("stopped after {out} output tokens");
+        }
         let budget = agent.context_budget.max(1_000) as usize;
         compact::maybe(&st.db, agent_id, budget, |prompt| {
             let st = st.clone();
@@ -197,10 +217,22 @@ pub async fn run(st: Arc<State>, agent_id: i64, text: &str, prio: Priority, trig
             let args: Value = serde_json::from_str(c["function"]["arguments"].as_str().unwrap_or("{}"))
                 .unwrap_or_else(|e| json!({"_parse_error": e.to_string()}));
             let agent = store::get_agent(&st.db, agent_id).await?; // an earlier "always allow" may have changed it
-            let decision = match policy::rule(&agent, &name, &args, mcp.read_only(&name)) {
+            let side_effect = matches!(name.as_str(), "write_file" | "delete_file" | "shell" | "notes_add")
+                || (name.starts_with("mcp__") && !mcp.read_only(&name));
+            let base = policy::rule(&agent, &name, &args, mcp.read_only(&name));
+            // prompt-injection guard: content from outside may be steering this call
+            let guarded = base == Rule::Allow && tainted && side_effect;
+            let rule = if guarded { Rule::Ask } else { base };
+            tainted |= brings_untrusted(&name);
+            let decision = match rule {
                 Rule::Allow => "auto",
                 Rule::Deny => "denied",
-                Rule::Ask if policy::ask(&st, agent_id, run_id, &name, &args).await? => "approved",
+                Rule::Ask if policy::ask(&st, agent_id, run_id, &name, &match (guarded, &args) {
+                    (true, Value::Object(m)) => json!(m.clone().into_iter()
+                        .chain([("_why".to_string(), json!("asked because this run read web or MCP content"))])
+                        .collect::<serde_json::Map<_, _>>()),
+                    _ => args.clone(),
+                }).await? => "approved",
                 Rule::Ask => "denied",
             };
             let approved_host = (decision == "approved" && name == "http_fetch")

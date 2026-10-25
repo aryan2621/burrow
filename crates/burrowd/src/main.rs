@@ -31,6 +31,16 @@ async fn main() -> Result<()> {
         None => dirs::home_dir().context("no home dir")?.join(".burrow"),
     };
     std::fs::create_dir_all(&home)?;
+    // Crash reports stay local (nothing is uploaded); users attach one to an issue if they want.
+    let crashes = home.join("crashes");
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let _ = std::fs::create_dir_all(&crashes);
+        let _ = std::fs::write(crashes.join(format!("{t}.txt")), format!("burrowd {} on {} {}\n{info}\n\n{}",
+            env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH, std::backtrace::Backtrace::force_capture()));
+        default_hook(info);
+    }));
     match std::env::args().nth(1).as_deref() {
         None | Some("run") => {}
         Some("install") => {

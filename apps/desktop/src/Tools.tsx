@@ -18,8 +18,8 @@ export default function Tools({ agent }: { agent: Agent }) {
     try {
       const r = await rpc<{ warnings: string[] }>("mcp.add", {
         agent_id: agent.id, name: f.name, transport: f.transport,
-        // shortcut: arguments split on spaces; quoting isn't supported
-        command: f.command.split(/\s+/).filter(Boolean), url: f.url || null,
+        // words split on spaces; "double" or 'single' quotes keep spaces in one argument
+        command: [...f.command.matchAll(/"([^"]*)"|'([^']*)'|(\S+)/g)].map((m) => m[1] ?? m[2] ?? m[3]), url: f.url || null,
         secrets: f.secrets.split(",").map((s) => s.trim()).filter(Boolean),
       });
       setWarnings(r.warnings);

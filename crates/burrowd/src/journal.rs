@@ -5,6 +5,33 @@ use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 use std::path::{Path, PathBuf};
 
+/// Key for undo snapshots, derived from the DB key at startup. Unset (tests), snapshots stay plaintext.
+pub static SNAP_KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+
+fn aead() -> Option<aws_lc_rs::aead::LessSafeKey> {
+    use aws_lc_rs::aead::{LessSafeKey, UnboundKey, CHACHA20_POLY1305};
+    SNAP_KEY.get().map(|k| LessSafeKey::new(UnboundKey::new(&CHACHA20_POLY1305, k).unwrap()))
+}
+
+/// Encrypted snapshot file: 12-byte random nonce, then ciphertext + tag.
+fn seal(key: &aws_lc_rs::aead::LessSafeKey, plain: &[u8]) -> Result<Vec<u8>> {
+    use aws_lc_rs::aead::{Aad, Nonce};
+    let mut n = [0u8; 12];
+    getrandom::fill(&mut n).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut buf = plain.to_vec();
+    key.seal_in_place_append_tag(Nonce::assume_unique_for_key(n), Aad::empty(), &mut buf).map_err(|_| anyhow::anyhow!("seal failed"))?;
+    Ok([n.as_slice(), &buf].concat())
+}
+
+fn unseal(key: &aws_lc_rs::aead::LessSafeKey, mut b: Vec<u8>) -> Result<Vec<u8>> {
+    use aws_lc_rs::aead::{Aad, Nonce};
+    anyhow::ensure!(b.len() >= 12, "snapshot is corrupt");
+    let n: [u8; 12] = b[..12].try_into()?;
+    let plain = key.open_in_place(Nonce::assume_unique_for_key(n), Aad::empty(), &mut b[12..])
+        .map_err(|_| anyhow::anyhow!("snapshot is corrupt or the key changed"))?;
+    Ok(plain.to_vec())
+}
+
 /// Serializes appends so two agents can't both chain onto the same `prev_hash`.
 static APPEND: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -94,10 +121,20 @@ pub fn snapshot(snapshots: &Path, path: &Path, after: Option<&[u8]>) -> Result<V
     let before = match std::fs::read(path) {
         Ok(bytes) => {
             let h = sha256(&bytes);
-            let dst = snapshots.join(&h);
-            if !dst.exists() {
-                std::fs::create_dir_all(snapshots)?;
-                std::fs::copy(path, &dst)?; // APFS clonefile on macOS
+            std::fs::create_dir_all(snapshots)?;
+            match aead() {
+                Some(k) => {
+                    let dst = snapshots.join(format!("{h}.enc"));
+                    if !dst.exists() {
+                        std::fs::write(&dst, seal(&k, &bytes)?)?;
+                    }
+                }
+                None => {
+                    let dst = snapshots.join(&h);
+                    if !dst.exists() {
+                        std::fs::copy(path, &dst)?; // APFS clonefile on macOS
+                    }
+                }
             }
             Some(h)
         }
@@ -135,7 +172,11 @@ pub async fn undo(db: &SqlitePool, snapshots: &Path, action_id: i64, force: bool
         bail!("{} changed after the agent touched it; undo with force to overwrite", path.display());
     }
     match inv["snapshot"].as_str() {
-        Some(h) => { std::fs::copy(snapshots.join(h), &path)?; }
+        Some(h) => match (aead(), std::fs::read(snapshots.join(format!("{h}.enc")))) {
+            (Some(k), Ok(b)) => std::fs::write(&path, unseal(&k, b)?)?,
+            // snapshots taken before encryption existed
+            _ => { std::fs::copy(snapshots.join(h), &path)?; }
+        },
         None => match std::fs::remove_file(&path) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
             _ => {}

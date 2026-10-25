@@ -19,4 +19,7 @@ Private network addresses must be listed exactly (e.g. `192.168.1.10`).
 **Undo refused** — the file changed after the agent wrote it. Force the undo to overwrite your
 change.
 
+**The daemon crashed** — a report is in `~/.burrow/crashes/`. It stays on your machine; attach it
+to an issue if you want help.
+
 **Reset everything** — quit the app, stop the service, delete `~/.burrow/`.

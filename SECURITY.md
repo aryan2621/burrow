@@ -35,4 +35,6 @@ otherwise. Please don't open a public issue for an unfixed vulnerability.
 - No TLS interception, so secrets can't be injected into sandbox HTTPS traffic; bound secrets
   only reach `http_fetch` and HTTP MCP servers, which the daemon calls itself.
 - Rootless Podman networking on Linux isn't supported yet.
+- Agent scratch folders aren't encrypted at rest (the sandbox mounts them); the database and undo
+  snapshots are.
 - Release builds aren't code-signed until the signing accounts exist.

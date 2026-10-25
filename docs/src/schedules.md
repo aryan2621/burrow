@@ -9,4 +9,4 @@ An agent's **Schedules** tab runs a prompt without you:
 Scheduled runs work in the background with the window closed, as long as the daemon runs (turn on
 **Start at login**). Approvals still ask, as a notification. If the agent is busy, one firing
 waits and later ones are skipped (and journaled). A time missed while the daemon was off fires once
-at startup.
+at startup. On battery below 20%, scheduled runs wait until you plug in.

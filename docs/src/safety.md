@@ -15,6 +15,8 @@
   force it. Shell commands and web requests can't be undone and are marked so.
 - **Kill switch:** stops the run, denies its pending approvals and removes its sandbox.
 - **Untrusted content:** fetched pages and search results are wrapped in `<untrusted>` tags, and
-  the model is told never to follow instructions inside them.
+  the model is told never to follow instructions inside them. Once a run has read web or MCP
+  content, every write, delete, shell command or note for the rest of that run asks you first.
+- **Runaway limits:** a run stops after 10 steps, 30 minutes or 32,000 generated tokens.
 
 See `SECURITY.md` in the repository for what counts as a vulnerability.

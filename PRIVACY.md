@@ -3,6 +3,9 @@
 Burrow has no telemetry, no accounts and no Burrow servers. Your chats, files, notes, journal and
 secrets stay on your machine: the database (`~/.burrow/burrow.db`) is encrypted with SQLCipher, its
 key and your secrets live in the OS keychain (or a `0600` key file where no keychain is available).
+Undo snapshots are encrypted with a key derived from it. Agent scratch folders are not encrypted,
+because the sandbox mounts them directly. Crash reports are written to `~/.burrow/crashes/` and never
+sent anywhere.
 
 ## Network calls Burrow makes
 
