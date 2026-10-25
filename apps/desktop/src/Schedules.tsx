@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Agent, Schedule, pickFolder, rpc, ui } from "./rpc";
+import { Agent, Routine, Schedule, pickFolder, rpc, ui } from "./rpc";
 
 const HINT = { cron: "0 9 * * 1-5  (min hour day month weekday)", interval: "3600  (seconds, at least 60)", file: "a folder or file inside the agent's folders",
   email: "email connection name (new mail in INBOX)", calendar: "calendar connection name (events starting in 15 min)",
@@ -9,9 +9,13 @@ const HINT = { cron: "0 9 * * 1-5  (min hour day month weekday)", interval: "360
 export default function Schedules({ agent }: { agent: Agent }) {
   const [list, setList] = useState<Schedule[]>([]);
   const [error, setError] = useState("");
-  const [f, setF] = useState({ kind: "cron" as Schedule["kind"], spec: "", prompt: "" });
+  const [f, setF] = useState({ kind: "cron" as Schedule["kind"], spec: "", prompt: "", routine_id: null as number | null });
+  const [routines, setRoutines] = useState<Routine[]>([]);
 
-  const load = () => rpc<Schedule[]>("schedules.list", { agent_id: agent.id }).then(setList, (e) => setError(String(e)));
+  const load = () => {
+    rpc<Schedule[]>("schedules.list", { agent_id: agent.id }).then(setList, (e) => setError(String(e)));
+    rpc<Routine[]>("routines.list", { agent_id: agent.id }).then(setRoutines, (e) => setError(String(e)));
+  };
   useEffect(() => void load(), [agent.id]);
 
   const call = (method: string, params: object) => {
@@ -20,19 +24,37 @@ export default function Schedules({ agent }: { agent: Agent }) {
   };
   const add = (e: React.FormEvent) => {
     e.preventDefault();
-    call("schedules.add", { agent_id: agent.id, ...f }).then(() => setF({ ...f, spec: "", prompt: "" }), () => {});
+    call("schedules.add", { agent_id: agent.id, ...f }).then(() => setF({ ...f, spec: "", prompt: "", routine_id: null }), () => {});
   };
   const when = (s: Schedule) =>
     s.kind === "file" ? "on change" : ["email", "calendar", "github"].includes(s.kind) ? "checks every minute" : s.next_run_at ? `next ${new Date(s.next_run_at * 1000).toLocaleString()}` : "";
 
   return (
     <div className="h-full max-w-2xl space-y-4 overflow-y-auto p-4">
+      <section className="space-y-2">
+        <h3 className="font-semibold">Routines</h3>
+        {routines.length === 0 && <p className="text-sm text-stone-500">Save a finished run as a routine from the Timeline to reuse it here.</p>}
+        {routines.map((r) => (
+          <div key={r.id} className="flex items-center justify-between gap-2 rounded border border-stone-200 p-2 text-sm dark:border-stone-700">
+            <span className="min-w-0">
+              <span className="font-semibold">{r.name}</span>{" "}
+              <span className="text-stone-500">· tools: {r.tools.join(", ") || "none"}{r.approved.length > 0 && ` · pre-approved: ${r.approved.join(", ")}`}</span>
+            </span>
+            <span className="flex shrink-0 gap-2">
+              <button className={ui.button} onClick={() => call("routines.run", { id: r.id }).catch(() => {})}>Run now</button>
+              <button className={ui.button} onClick={() => confirm(`Delete routine ${r.name}?`) && call("routines.delete", { id: r.id }).catch(() => {})}>Delete</button>
+            </span>
+          </div>
+        ))}
+      </section>
+      <h3 className="font-semibold">Schedules</h3>
       {list.length === 0 && <p className="text-sm text-stone-500">No schedules yet.</p>}
       <ul className="space-y-2">
         {list.map((s) => (
           <li key={s.id} className="rounded border border-stone-200 p-2 text-sm dark:border-stone-700">
             <div className="flex items-center justify-between gap-2">
-              <span><span className="font-mono">{s.kind}</span> {s.spec} <span className="text-stone-500">· {s.enabled ? when(s) : "paused"}</span></span>
+              <span><span className="font-mono">{s.kind}</span> {s.spec} <span className="text-stone-500">· {s.enabled ? when(s) : "paused"}</span>
+                {s.routine_id !== null && <span className="text-stone-500"> · routine {routines.find((r) => r.id === s.routine_id)?.name ?? s.routine_id}</span>}</span>
               <span className="flex shrink-0 gap-2">
                 <button className={ui.button} onClick={() => call("schedules.update", { id: s.id, enabled: !s.enabled }).catch(() => {})}>
                   {s.enabled ? "Pause" : "Resume"}
@@ -62,8 +84,16 @@ export default function Schedules({ agent }: { agent: Agent }) {
             <button type="button" className={ui.button} onClick={async () => { const p = await pickFolder(); if (p) setF({ ...f, spec: p }); }}>Choose…</button>
           )}
         </div>
-        <textarea aria-label="What the agent should do" className={ui.input} rows={3} required placeholder="What should the agent do each time?"
-          value={f.prompt} onChange={(e) => setF({ ...f, prompt: e.target.value })} />
+        {routines.length > 0 && (
+          <select aria-label="Routine" className={ui.input} value={f.routine_id ?? ""} onChange={(e) => setF({ ...f, routine_id: e.target.value ? Number(e.target.value) : null })}>
+            <option value="">Write a prompt</option>
+            {routines.map((r) => <option key={r.id} value={r.id}>Run routine: {r.name}</option>)}
+          </select>
+        )}
+        {f.routine_id === null && (
+          <textarea aria-label="What the agent should do" className={ui.input} rows={3} required placeholder="What should the agent do each time?"
+            value={f.prompt} onChange={(e) => setF({ ...f, prompt: e.target.value })} />
+        )}
         {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
         <button className={ui.primary}>Add schedule</button>
       </form>

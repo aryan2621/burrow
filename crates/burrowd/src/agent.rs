@@ -4,7 +4,7 @@ use crate::llama::{self, Llama};
 use crate::queue::{Priority, Queue};
 use crate::sandbox::{self, Sandbox};
 use crate::secrets::{self, Vault};
-use crate::{compact, connectors, fetch, journal, mcp, models, notes, proxy, search, store, tools};
+use crate::{artifacts, compact, connectors, rooms, routines, fetch, journal, mcp, models, notes, proxy, search, store, tools};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -18,7 +18,7 @@ use tokio::task::AbortHandle;
 
 /// Tools whose output is outside content; after one runs, side effects need approval.
 fn brings_untrusted(tool: &str) -> bool {
-    matches!(tool, "http_fetch" | "web_search") || tool.starts_with("mcp__") || connectors::untrusted(tool)
+    matches!(tool, "http_fetch" | "web_search" | "artifact_read" | "room_notes_search") || tool.starts_with("mcp__") || connectors::untrusted(tool)
 }
 const SHELL_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -104,7 +104,7 @@ fn repair(msgs: Vec<Value>) -> Vec<Value> {
 
 /// Execute one approved tool call. Errors become text for the model.
 async fn exec_tool(st: &Arc<State>, agent: &store::Agent, folders: &[PathBuf], scratch: &PathBuf, name: &str, args: &Value,
-                   approved_host: Option<String>, bound: &[secrets::Bound], mcp: &mcp::Session) -> tools::Outcome {
+                   approved_host: Option<String>, bound: &[secrets::Bound], mcp: &mcp::Session, room: Option<i64>) -> tools::Outcome {
     let text = |k: &str| args[k].as_str().unwrap_or("").to_string();
     let res = match name {
         "shell" => match args["command"].as_str() {
@@ -120,6 +120,11 @@ async fn exec_tool(st: &Arc<State>, agent: &store::Agent, folders: &[PathBuf], s
         },
         n if n.starts_with("mcp__") => mcp.call(n, args).await,
         n if connectors::TOOLS.contains(&n) => return connectors::call(st, agent.id, n, args).await,
+        n if artifacts::TOOLS.contains(&n) => return artifacts::call(&st.db, agent.id, room, folders, n, args).await,
+        n if rooms::TOOLS.contains(&n) => return match room {
+            Some(r) => rooms::call(st, r, n, args).await,
+            None => "error: room tools work only in a room".to_string().into(),
+        },
         "notes_search" => notes::search(&st.db, agent.id, &text("query")).await,
         "web_search" => async {
             let b = search::backend(&st.db, &st.vault).await?.context("web search is not configured")?;
@@ -165,7 +170,8 @@ async fn call_model(st: &State, agent_id: i64, run_id: i64, prio: Priority, mode
         let (r, u) = models::chat(&st.http, &format!("{base}/v1"), None, model, msgs, tools, on_delta).await?;
         (r, u, t0.elapsed())
     };
-    store::add_model_call(&st.db, agent_id, run_id, model_ref, &usage, ms.as_millis() as i64).await?;
+    let cost = models::price(&st.db, model_ref).await.map(|p| models::cost(p, &usage));
+    store::add_model_call(&st.db, agent_id, run_id, model_ref, &usage, ms.as_millis() as i64, cost).await?;
     Ok(reply)
 }
 
@@ -180,7 +186,8 @@ async fn review(st: &State, agent: &store::Agent, run_id: i64, prio: Priority, r
     let prompt = format!("You check actions an AI agent is about to take for its user. Reply `yes` if the action \
         is what the user's request calls for, otherwise `no: <short reason>`. Reply with nothing else.\n\n\
         User's request:\n{request}\n\nAgent's last message:\n{said}\n\nAction: {action}");
-    let r = call_model(st, agent.id, run_id, prio, &agent.model_ref, &[json!({"role": "user", "content": prompt})], &json!([]), |_| {}).await;
+    let model = agent.limits.cheap_model_ref.as_deref().unwrap_or(&agent.model_ref);
+    let r = call_model(st, agent.id, run_id, prio, model, &[json!({"role": "user", "content": prompt})], &json!([]), |_| {}).await;
     let r = match r {
         Ok(r) => r,
         Err(e) => return Some(format!("review failed: {e:#}")),
@@ -194,7 +201,7 @@ async fn review(st: &State, agent: &store::Agent, run_id: i64, prio: Priority, r
 /// Handle one user message to completion: model → tools → model … until a plain reply.
 pub async fn run(st: Arc<State>, agent_id: i64, text: &str, prio: Priority, trigger: &str) -> Result<()> {
     let agent = store::get_agent(&st.db, agent_id).await?;
-    let run_id = store::start_run(&st.db, agent_id, trigger).await?;
+    let run_id = store::start_run(&st.db, agent_id, trigger, text).await?;
     let bound = Arc::new(secrets::for_agent(&st.db, &st.vault, agent_id).await?);
     let scratch = st.scratch(agent_id)?;
     let mut folders = agent.folders.clone();
@@ -215,6 +222,15 @@ pub async fn run(st: Arc<State>, agent_id: i64, text: &str, prio: Priority, trig
     let mut specs = tools::specs(search::backend(&st.db, &st.vault).await?.is_some());
     specs.extend(mcp.specs.iter().cloned());
     specs.extend(connectors::specs(&connectors::for_agent(&st.db, agent_id).await?));
+    specs.extend(artifacts::specs());
+    let room: Option<i64> = trigger.strip_prefix("room:").and_then(|r| r.parse().ok());
+    if room.is_some() {
+        specs.extend(rooms::specs());
+    }
+    let routine = routines::for_trigger(&st.db, trigger).await?;
+    if let Some(r) = &routine {
+        specs.retain(|s| s["function"]["name"].as_str().is_some_and(|n| r.tools.iter().any(|t| t == n)));
+    }
     let specs = Value::from(specs);
 
     store::add_message(&st.db, agent_id, &json!({"role": "user", "content": text})).await?;
@@ -231,10 +247,16 @@ pub async fn run(st: Arc<State>, agent_id: i64, text: &str, prio: Priority, trig
         if out > lim.max_run_tokens {
             bail!("stopped after {out} output tokens");
         }
+        if lim.monthly_usd > 0.0 {
+            let spent = store::month_cost(&st.db, agent_id).await?;
+            if spent >= lim.monthly_usd {
+                bail!("monthly budget reached (${spent:.2} of ${:.2})", lim.monthly_usd);
+            }
+        }
         let budget = agent.context_budget.max(1_000) as usize;
         compact::maybe(&st.db, agent_id, budget, |prompt| {
             let st = st.clone();
-            let model_ref = agent.model_ref.clone();
+            let model_ref = lim.cheap_model_ref.clone().unwrap_or_else(|| agent.model_ref.clone());
             async move {
                 let r = call_model(&st, agent_id, run_id, prio, &model_ref, &prompt, &json!([]), |_| {}).await?;
                 Ok(r["content"].as_str().unwrap_or("").to_string())
@@ -260,12 +282,18 @@ pub async fn run(st: Arc<State>, agent_id: i64, text: &str, prio: Priority, trig
                 .unwrap_or_else(|e| json!({"_parse_error": e.to_string()}));
             let agent = store::get_agent(&st.db, agent_id).await?; // an earlier "always allow" may have changed it
             let side_effect = matches!(name.as_str(), "write_file" | "delete_file" | "shell" | "notes_add")
-                || (name.starts_with("mcp__") && !mcp.read_only(&name)) || connectors::side_effect(&name);
+                || (name.starts_with("mcp__") && !mcp.read_only(&name)) || connectors::side_effect(&name)
+                || matches!(name.as_str(), "artifact_save" | "room_notes_add");
             let base = policy::rule(&agent, &name, &args, mcp.read_only(&name));
+            // a routine's tools the user approved when it was saved don't ask again
+            let base = match &routine {
+                Some(r) if base == Rule::Ask && r.approved.contains(&name) => Rule::Allow,
+                _ => base,
+            };
             // prompt-injection guard: content from outside may be steering this call
             let guarded = base == Rule::Allow && tainted && side_effect;
             let why = if guarded {
-                Some("asked because this run read web or MCP content".to_string())
+                Some("asked because this run read outside content (web, email, MCP or another agent)".to_string())
             } else if base == Rule::Allow && side_effect && agent.limits.review {
                 let said = reply["content"].as_str().unwrap_or("");
                 review(&st, &agent, run_id, prio, text, said, &name, &args).await.map(|o| format!("the reviewer objected: {o}"))
@@ -293,7 +321,7 @@ pub async fn run(st: Arc<State>, agent_id: i64, text: &str, prio: Priority, trig
                 let mut out = if decision == "denied" {
                     tools::Outcome::from("denied by user".to_string())
                 } else {
-                    exec_tool(&st2, &agent, &folders, &scratch, &name, &args, approved_host, &bound, &mcp).await
+                    exec_tool(&st2, &agent, &folders, &scratch, &name, &args, approved_host, &bound, &mcp, room).await
                 };
                 out.output = secrets::scrub(&bound, out.output);
                 journal::record(&st2.db, journal::Entry { agent_id, run_id, tool: &name, input: &args,
@@ -326,7 +354,11 @@ pub fn spawn(st: Arc<State>, agent_id: i64, text: String, prio: Priority, trigge
             running.remove(&agent_id);
             st2.queued_fire.lock().unwrap().remove(&agent_id)
         };
-        st2.emit("chat.done", json!({"agent_id": agent_id, "trigger": trigger, "error": res.err().map(|e| format!("{e:#}"))}));
+        let error = res.err().map(|e| format!("{e:#}"));
+        st2.emit("chat.done", json!({"agent_id": agent_id, "trigger": trigger, "error": error}));
+        if let Some(room) = trigger.strip_prefix("room:").and_then(|r| r.parse().ok()) {
+            rooms::on_done(&st2, room, agent_id, error).await;
+        }
         if let Some((trigger, text)) = next {
             let _ = spawn(st2.clone(), agent_id, text, Priority::Background, trigger);
         }

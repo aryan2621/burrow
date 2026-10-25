@@ -94,6 +94,20 @@ export function PermissionsTab({ agent, onSaved }: { agent: Agent; onSaved: () =
         {num("max_run_secs", "Minutes", 60)}
         {num("max_run_tokens", "Output tokens")}
       </fieldset>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="block text-sm">
+          Monthly cloud budget (USD, 0 = none)
+          <input type="number" min={0} step="0.5" className={ui.input} value={limits.monthly_usd}
+            onChange={(e) => setLimits({ ...limits, monthly_usd: Number(e.target.value) })} />
+        </label>
+        <label className="block text-sm">
+          Cheap model for summaries and reviews
+          <select className={ui.input} value={limits.cheap_model_ref ?? ""} onChange={(e) => setLimits({ ...limits, cheap_model_ref: e.target.value || null })}>
+            <option value="">Same as the agent's model</option>
+            {models.map((m) => <option key={m}>{m}</option>)}
+          </select>
+        </label>
+      </div>
       <label className="flex items-center gap-2 text-sm">
         <input type="checkbox" checked={limits.review} onChange={(e) => setLimits({ ...limits, review: e.target.checked })} />
         Review auto-allowed changes with a second model call (an objection asks you first)

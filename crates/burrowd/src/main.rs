@@ -1,4 +1,5 @@
 mod agent;
+mod artifacts;
 mod awake;
 mod backup;
 mod compact;
@@ -14,6 +15,8 @@ mod notes;
 mod policy;
 mod proxy;
 mod queue;
+mod rooms;
+mod routines;
 mod rpc;
 mod sandbox;
 mod schedule;

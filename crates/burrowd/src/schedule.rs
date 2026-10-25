@@ -64,10 +64,19 @@ async fn validate(db: &SqlitePool, agent_id: i64, kind: &str, spec: &str) -> Res
 pub async fn add(db: &SqlitePool, p: &Value) -> Result<i64> {
     let agent_id = p["agent_id"].as_i64().context("missing `agent_id`")?;
     let kind = p["kind"].as_str().context("missing `kind`")?;
-    let prompt = p["prompt"].as_str().filter(|s| !s.trim().is_empty()).context("missing `prompt`")?;
+    // a routine brings its own prompt
+    let routine = p["routine_id"].as_i64();
+    let prompt = match routine {
+        Some(r) => {
+            let (owner, prompt) = crate::routines::start(db, r).await?;
+            anyhow::ensure!(owner == agent_id, "that routine belongs to another agent");
+            prompt
+        }
+        None => p["prompt"].as_str().filter(|s| !s.trim().is_empty()).context("missing `prompt`")?.to_string(),
+    };
     let spec = validate(db, agent_id, kind, p["spec"].as_str().context("missing `spec`")?).await?;
-    Ok(sqlx::query("INSERT INTO schedules (agent_id, kind, spec, prompt, next_run_at) VALUES (?, ?, ?, ?, ?)")
-        .bind(agent_id).bind(kind).bind(&spec).bind(prompt).bind(next_after(kind, &spec, now())?)
+    Ok(sqlx::query("INSERT INTO schedules (agent_id, kind, spec, prompt, next_run_at, routine_id) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(agent_id).bind(kind).bind(&spec).bind(prompt).bind(next_after(kind, &spec, now())?).bind(routine)
         .execute(db).await?.last_insert_rowid())
 }
 
@@ -95,7 +104,8 @@ pub async fn list(db: &SqlitePool, agent_id: i64) -> Result<Vec<Value>> {
     let rows = sqlx::query("SELECT * FROM schedules WHERE agent_id = ? ORDER BY id").bind(agent_id).fetch_all(db).await?;
     Ok(rows.iter().map(|r| json!({"id": r.get::<i64, _>("id"), "agent_id": agent_id, "kind": r.get::<String, _>("kind"),
         "spec": r.get::<String, _>("spec"), "prompt": r.get::<String, _>("prompt"), "enabled": r.get::<i64, _>("enabled") != 0,
-        "next_run_at": r.get::<Option<i64>, _>("next_run_at"), "last_run_at": r.get::<Option<i64>, _>("last_run_at")})).collect())
+        "next_run_at": r.get::<Option<i64>, _>("next_run_at"), "last_run_at": r.get::<Option<i64>, _>("last_run_at"),
+        "routine_id": r.get::<Option<i64>, _>("routine_id")})).collect())
 }
 
 /// Start a background run, or queue it if the agent is busy (one queued firing per agent).

@@ -278,7 +278,7 @@ mod tests {
         assert!(format!("{:#}", check(&st, &sh, 0, "example.org", 443).await.unwrap_err()).contains("no run is active"));
 
         // a new host during a run asks; approving once covers the run
-        let run_id = store::start_run(&st.db, id, "chat").await.unwrap();
+        let run_id = store::start_run(&st.db, id, "chat", "").await.unwrap();
         let mut ev = st.events.subscribe();
         let (st2, sh2) = (st.clone(), sh.clone());
         let asking = tokio::spawn(async move { check(&st2, &sh2, run_id, "localhost.example", 443).await });

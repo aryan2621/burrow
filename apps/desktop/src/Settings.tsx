@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Agent, CatalogModel, Connection, Hardware, Providers, Secret, Status, pickFile, pickSavePath, rpc, ui } from "./rpc";
+import { Agent, CatalogModel, Connection, Cost, Hardware, Providers, Secret, Status, pickFile, pickSavePath, rpc, ui } from "./rpc";
 import useDownloads from "./useDownloads";
 
 const gb = (b: number) => `${(b / 2 ** 30).toFixed(1)} GB`;
@@ -91,6 +91,41 @@ function Cloud() {
           onChange={(e) => setKeys({ ...keys, base_url: e.target.value })} />
         <button className={ui.button} disabled={!keys.base_url} onClick={() => set({ provider: "openai", base_url: keys.base_url })}>Save</button>
         <button className={ui.button} onClick={() => set({ provider: "openai", base_url: null })}>Reset</button>
+      </div>
+      {msg && <p role="status">{msg}</p>}
+    </div>
+  );
+}
+
+function Costs() {
+  const [costs, setCosts] = useState<Cost[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [prices, setPrices] = useState("");
+  const [msg, setMsg] = useState("");
+  useEffect(() => {
+    rpc<Cost[]>("costs.summary").then(setCosts);
+    rpc<Agent[]>("agents.list").then(setAgents);
+    rpc<string | null>("settings.get", { key: "prices" }).then((p) => setPrices(p ?? ""));
+  }, []);
+  const name = (id: number) => agents.find((a) => a.id === id)?.name ?? `agent ${id} (deleted)`;
+  const save = () => rpc("settings.set", { key: "prices", value: prices || "{}" }).then(() => setMsg("Saved"), (e) => setMsg(String(e)));
+  return (
+    <div className="space-y-2 text-sm">
+      <table className="w-full">
+        <thead><tr className="text-left text-stone-500"><th>Agent</th><th>This month</th><th>All time</th></tr></thead>
+        <tbody>
+          {costs.map((c) => (
+            <tr key={c.agent_id}>
+              <td>{name(c.agent_id)}</td><td>${c.month_usd.toFixed(2)}</td>
+              <td>${c.total_usd.toFixed(2)}{c.unpriced_calls > 0 && <span className="text-stone-500"> + {c.unpriced_calls} unpriced calls</span>}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="text-stone-500">Local models are free. Claude prices are built in; for other cloud models, give USD per million input/output tokens.</p>
+      <div className="flex gap-2">
+        <input aria-label="Prices" className={`${ui.input} font-mono`} placeholder='{"openai:gpt-5": [1.25, 10]}' value={prices} onChange={(e) => setPrices(e.target.value)} />
+        <button className={ui.button} onClick={save}>Save</button>
       </div>
       {msg && <p role="status">{msg}</p>}
     </div>
@@ -287,6 +322,7 @@ export default function Settings() {
         <>
           <section className={section}><h3 className="font-semibold">Web search</h3><Search status={status} reload={reload} /></section>
           <section className={section}><h3 className="font-semibold">Cloud models</h3><Cloud /></section>
+          <section className={section}><h3 className="font-semibold">Costs</h3><Costs /></section>
           <section className={section}><h3 className="font-semibold">Connections</h3><Connections /></section>
           <section className={section}><h3 className="font-semibold">Secrets</h3><Secrets /></section>
           <section className={section}><h3 className="font-semibold">Backup and data</h3><Data /></section>

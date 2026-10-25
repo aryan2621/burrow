@@ -1,6 +1,6 @@
 use crate::agent::{self, State};
 use crate::queue::Priority;
-use crate::{backup, connectors, download, notes, hardware, journal, mcp, models, policy, schedule, search, secrets, service, store};
+use crate::{artifacts, backup, connectors, rooms, routines, download, notes, hardware, journal, mcp, models, policy, schedule, search, secrets, service, store};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -149,12 +149,16 @@ fn limits(v: &Value, cur: store::Limits) -> Result<store::Limits> {
     anyhow::ensure!((1..=200).contains(&l.max_steps), "max_steps must be 1–200");
     anyhow::ensure!((10..=24 * 3600).contains(&l.max_run_secs), "max_run_secs must be 10–86400");
     anyhow::ensure!((1_000..=10_000_000).contains(&l.max_run_tokens), "max_run_tokens must be 1000–10000000");
+    anyhow::ensure!(l.monthly_usd >= 0.0, "monthly_usd can't be negative");
+    if let Some(m) = &l.cheap_model_ref {
+        models::parse_ref(m)?;
+    }
     Ok(l)
 }
 
 /// UI preferences only; settings with their own validation (search) have their own RPCs.
 fn setting_key(k: &str) -> Result<&str> {
-    anyhow::ensure!(matches!(k, "onboarded"), "unknown setting `{k}`");
+    anyhow::ensure!(matches!(k, "onboarded" | "prices"), "unknown setting `{k}`");
     Ok(k)
 }
 
@@ -204,6 +208,54 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
         "connections.delete" => {
             connectors::delete(&st.db, &st.vault, s("name")?).await?;
             json!(true)
+        }
+        "rooms.list" => json!(rooms::list(&st.db).await?),
+        "rooms.create" => json!(rooms::create(&st.db, p).await?),
+        "rooms.delete" => {
+            rooms::delete(&st.db, int("room_id")?).await?;
+            json!(true)
+        }
+        "rooms.messages" => json!(rooms::messages(&st.db, int("room_id")?).await?),
+        "rooms.post" => {
+            rooms::post(st, int("room_id")?, None, s("text")?).await?;
+            json!(true)
+        }
+        "tasks.list" => json!(rooms::tasks(&st.db, int("room_id")?).await?),
+        "tasks.save" => json!(rooms::upsert_task(&st.db, int("room_id")?, p).await?),
+        "tasks.delete" => {
+            sqlx::query("DELETE FROM tasks WHERE id = ?").bind(int("id")?).execute(&st.db).await?;
+            json!(true)
+        }
+        "artifacts.list" => json!(artifacts::list(&st.db).await?),
+        "artifacts.versions" => json!(artifacts::versions(&st.db, int("id")?).await?),
+        "artifacts.content" => artifacts::content(&st.db, int("version_id")?).await?,
+        "artifacts.share" => {
+            artifacts::share(&st.db, int("id")?, id()?, &p["write"]).await?;
+            json!(true)
+        }
+        "artifacts.delete" => {
+            artifacts::delete(&st.db, int("id")?).await?;
+            json!(true)
+        }
+        "routines.list" => json!(routines::list(&st.db, id()?).await?),
+        "routines.save" => json!(routines::save(&st.db, int("run_id")?, s("name")?).await?),
+        "routines.delete" => {
+            routines::delete(&st.db, int("id")?).await?;
+            json!(true)
+        }
+        "routines.run" => {
+            let rid = int("id")?;
+            let (agent_id, prompt) = routines::start(&st.db, rid).await?;
+            agent::spawn(st.clone(), agent_id, prompt, Priority::Interactive, format!("routine:{rid}"))?;
+            json!(true)
+        }
+        "costs.summary" => {
+            let rows = sqlx::query("SELECT agent_id, COALESCE(SUM(cost_usd), 0.0) AS total,
+                COALESCE(SUM(CASE WHEN created_at >= strftime('%Y-%m-01', 'now') THEN cost_usd END), 0.0) AS month,
+                SUM(cost_usd IS NULL) AS unpriced FROM model_calls GROUP BY agent_id").fetch_all(&st.db).await?;
+            use sqlx::Row;
+            json!(rows.iter().map(|r| json!({"agent_id": r.get::<i64, _>(0), "total_usd": r.get::<f64, _>(1),
+                "month_usd": r.get::<f64, _>(2), "unpriced_calls": r.get::<i64, _>(3)})).collect::<Vec<_>>())
         }
         "backup.export" => {
             backup::export(st, Path::new(s("path")?), s("passphrase")?).await?;
@@ -334,6 +386,13 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
             json!(v)
         }
         "settings.set" => {
+            if s("key")? == "prices" {
+                let v: std::collections::HashMap<String, (f64, f64)> = serde_json::from_str(s("value")?)
+                    .context("prices: {\"openai:model\": [input, output] USD per million tokens}")?;
+                for k in v.keys() {
+                    models::parse_ref(k)?;
+                }
+            }
             sqlx::query("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
                 .bind(setting_key(s("key")?)?).bind(s("value")?).execute(&st.db).await?;
             json!(true)

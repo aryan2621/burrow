@@ -10,7 +10,8 @@ function Shot({ agentId, path }: { agentId: number; path: string }) {
   return src ? <img src={src} alt="Browser screenshot" className="mt-1 max-h-64 rounded border border-stone-200 dark:border-stone-700" /> : null;
 }
 
-const triggerLabel = (t: string) => (t === "chat" ? "chat" : t.startsWith("schedule:") ? `schedule #${t.slice(9)}` : t);
+const triggerLabel = (t: string) => (t === "chat" ? "chat" : t.startsWith("schedule:") ? `schedule #${t.slice(9)}`
+  : t.startsWith("routine:") ? `routine #${t.slice(8)}` : t.startsWith("room:") ? `room #${t.slice(5)}` : t);
 
 /** Every run with its model calls and actions in time order, plus undo. The journal is append-only. */
 export default function Timeline({ agent }: { agent: Agent }) {
@@ -60,6 +61,8 @@ export default function Timeline({ agent }: { agent: Agent }) {
         ].sort((a, b) => a.at - b.at);
         const tokens = calls.filter((c) => c.run_id === run.id).reduce((n, c) => n + (c.prompt_tokens ?? 0) + (c.completion_tokens ?? 0), 0);
         const undoable = actions.some((a) => a.run_id === run.id && a.undoable && !a.undone_at);
+        const runCalls = calls.filter((c) => c.run_id === run.id);
+        const cost = runCalls.reduce((n, c) => n + (c.cost_usd ?? 0), 0);
         return (
           <section key={run.id} className="rounded border border-stone-200 dark:border-stone-700">
             <header className="flex justify-between gap-2 border-b border-stone-200 px-3 py-1.5 text-sm dark:border-stone-700">
@@ -67,14 +70,24 @@ export default function Timeline({ agent }: { agent: Agent }) {
                 Run {run.id} · {triggerLabel(run.trigger)} · {sqlTime(run.started_at).toLocaleString()} ·{" "}
                 <span className={run.status === "done" ? "" : "text-red-600"}>{run.status}</span>
                 {tokens > 0 && <span className="text-stone-500"> · {tokens.toLocaleString()} tokens</span>}
+                {cost > 0 && <span className="text-stone-500"> · ${cost.toFixed(4)}{runCalls.some((c) => c.cost_usd === null) ? "+" : ""}</span>}
               </span>
-              {undoable && <button onClick={() => act("runs.undo", { run_id: run.id }, "Undo run")} className="text-amber-800">Undo run</button>}
+              <span className="flex gap-3">
+                {run.status === "done" && (
+                  <button className="text-amber-800" onClick={() => {
+                    const name = prompt("Save this run as a routine named:");
+                    if (name) rpc("routines.save", { run_id: run.id, name }).then(() => setError(`Saved routine “${name}” (Schedules tab)`), (e) => setError(String(e)));
+                  }}>Save as routine</button>
+                )}
+                {undoable && <button onClick={() => act("runs.undo", { run_id: run.id }, "Undo run")} className="text-amber-800">Undo run</button>}
+              </span>
             </header>
             <ul>
               {items.map(({ call, action: a }, i) =>
                 call ? (
                   <li key={`c${i}`} className="px-3 py-1 text-xs text-stone-500">
                     model {call.model} · {call.prompt_tokens ?? "?"} → {call.completion_tokens ?? "?"} tokens · {(call.ms / 1000).toFixed(1)} s
+                    {call.cost_usd ? ` · $${call.cost_usd.toFixed(4)}` : ""}
                   </li>
                 ) : a ? (
                   <li key={a.id} className="flex items-start justify-between gap-3 px-3 py-1.5 text-sm">

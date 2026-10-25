@@ -168,6 +168,11 @@ pub async fn undo(db: &SqlitePool, snapshots: &Path, remote: Option<&crate::agen
         sqlx::query("INSERT INTO undos (action_id) VALUES (?)").bind(action_id).execute(db).await?;
         return Ok(());
     }
+    if let Some(v) = inv["artifact_version_id"].as_i64() {
+        crate::artifacts::undo(db, v).await?;
+        sqlx::query("INSERT INTO undos (action_id) VALUES (?)").bind(action_id).execute(db).await?;
+        return Ok(());
+    }
     if let Some(note) = inv["note_id"].as_i64() {
         crate::notes::delete(db, note).await?;
         sqlx::query("INSERT INTO undos (action_id) VALUES (?)").bind(action_id).execute(db).await?;

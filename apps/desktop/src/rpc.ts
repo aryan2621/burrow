@@ -19,7 +19,18 @@ export type Agent = {
   id: number; name: string; role_prompt: string; model_ref: string; folders: string[];
   allowed_domains: string[]; approval_rules: Record<string, Rule>; context_budget: number; limits: Limits;
 };
-export type Limits = { max_steps: number; max_run_secs: number; max_run_tokens: number; review: boolean };
+export type Limits = {
+  max_steps: number; max_run_secs: number; max_run_tokens: number; review: boolean; monthly_usd: number; cheap_model_ref: string | null;
+};
+export type Room = { id: number; name: string; coordinator_id: number; agent_ids: number[] };
+export type RoomMessage = { id: number; agent_id: number | null; text: string; created_at: string };
+export type Task = { id: number; title: string; assignee_id: number | null; status: "todo" | "doing" | "done" };
+export type Artifact = {
+  id: number; name: string; owner_id: number; room_id: number | null; latest: number; created_at: string; access: { agent_id: number; write: number }[];
+};
+export type ArtifactVersion = { id: number; version: number; author_id: number; size: number; created_at: string };
+export type Routine = { id: number; name: string; prompt: string; tools: string[]; approved: string[] };
+export type Cost = { agent_id: number; total_usd: number; month_usd: number; unpriced_calls: number };
 export type Note = { id: number; text: string; created_at: string };
 export type Providers = Record<"anthropic" | "openai", { configured: boolean; base_url?: string }>;
 export type Message = {
@@ -40,13 +51,14 @@ export type Event = {
 export type Run = { id: number; started_at: string; ended_at: string | null; status: string; trigger: string };
 export type ModelCall = {
   run_id: number; model: string; prompt_tokens: number | null; completion_tokens: number | null; ms: number; created_at: string;
+  cost_usd: number | null;
 };
 export type Connection = {
   name: string; kind: "email" | "calendar" | "github"; config: Record<string, string | number | string[]>; agent_ids: number[];
 };
 export type Schedule = {
   id: number; agent_id: number; kind: "cron" | "interval" | "file" | "email" | "calendar" | "github"; spec: string; prompt: string; enabled: boolean;
-  next_run_at: number | null; last_run_at: number | null;
+  next_run_at: number | null; last_run_at: number | null; routine_id: number | null;
 };
 export type CatalogModel = { id: string; name: string; size: number; min_ram_gb: number; installed: boolean; downloading: boolean };
 export type Hardware = { ram_gb: number; cores: number; os: string; arch: string; gpu: string; recommended: string | null };

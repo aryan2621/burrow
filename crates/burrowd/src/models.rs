@@ -12,6 +12,39 @@ pub fn parse_ref(model_ref: &str) -> Result<(&str, &str)> {
     }
 }
 
+/// USD per million (input, output) tokens. Local models are free; other cloud models are priced
+/// from the `prices` setting ({"openai:gpt-x": [in, out]}), else unknown.
+pub async fn price(db: &SqlitePool, model_ref: &str) -> Option<(f64, f64)> {
+    if !is_cloud(model_ref) {
+        return Some((0.0, 0.0));
+    }
+    // cached: 2026-10 list prices
+    let builtin = match model_ref {
+        "anthropic:claude-fable-5-1" | "anthropic:claude-fable-5" => Some((10.0, 50.0)),
+        "anthropic:claude-opus-5-5" => Some((4.0, 20.0)),
+        "anthropic:claude-opus-5" | "anthropic:claude-opus-4-8" | "anthropic:claude-opus-4-7" | "anthropic:claude-opus-4-6" => Some((5.0, 25.0)),
+        "anthropic:claude-sonnet-5-5" | "anthropic:claude-sonnet-5" => Some((2.0, 10.0)),
+        "anthropic:claude-sonnet-4-6" => Some((3.0, 15.0)),
+        "anthropic:claude-haiku-5-5" => Some((0.10, 0.50)),
+        "anthropic:claude-haiku-4-5" => Some((1.0, 5.0)),
+        _ => None,
+    };
+    if builtin.is_some() {
+        return builtin;
+    }
+    let s: String = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'prices'").fetch_optional(db).await.ok()??;
+    let v: Value = serde_json::from_str(&s).ok()?;
+    Some((v[model_ref][0].as_f64()?, v[model_ref][1].as_f64()?))
+}
+
+/// Cost of one call; cache reads bill at a tenth of the input price.
+// shortcut: cache writes (1.25x) count as plain input; track them if cache-heavy agents need exact bills.
+pub fn cost((input, output): (f64, f64), usage: &Value) -> f64 {
+    let prompt = usage["prompt_tokens"].as_f64().unwrap_or(0.0);
+    let cached = usage["cache_read_tokens"].as_f64().unwrap_or(0.0);
+    ((prompt - cached) * input + cached * input * 0.1 + usage["completion_tokens"].as_f64().unwrap_or(0.0) * output) / 1e6
+}
+
 pub fn is_cloud(model_ref: &str) -> bool {
     model_ref.starts_with("anthropic:") || model_ref.starts_with("openai:")
 }
@@ -285,7 +318,7 @@ pub async fn anthropic(
     }
     let mut blocks: Vec<Value> = vec![];
     let mut partial: Vec<String> = vec![]; // tool input JSON per block index
-    let (mut input_tokens, mut output_tokens, mut stop) = (0i64, 0i64, String::new());
+    let (mut input_tokens, mut cache_read, mut output_tokens, mut stop) = (0i64, 0i64, 0i64, String::new());
     let mut buf = Vec::new();
     let mut stream = res.bytes_stream();
     while let Some(chunk) = stream.next().await {
@@ -300,6 +333,7 @@ pub async fn anthropic(
                     let u = &v["message"]["usage"];
                     input_tokens = ["input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"]
                         .iter().filter_map(|k| u[k].as_i64()).sum();
+                    cache_read = u["cache_read_input_tokens"].as_i64().unwrap_or(0);
                 }
                 "content_block_start" => {
                     if blocks.len() <= i {
@@ -350,5 +384,5 @@ pub async fn anthropic(
     if !calls.is_empty() {
         msg["tool_calls"] = json!(calls);
     }
-    Ok((msg, json!({"prompt_tokens": input_tokens, "completion_tokens": output_tokens})))
+    Ok((msg, json!({"prompt_tokens": input_tokens, "cache_read_tokens": cache_read, "completion_tokens": output_tokens})))
 }

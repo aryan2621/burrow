@@ -30,11 +30,17 @@ pub struct Limits {
     pub max_run_tokens: i64,
     /// A second model call checks auto-allowed side effects against the request.
     pub review: bool,
+    /// Cloud spend cap per calendar month in USD; 0 means none.
+    #[serde(default)]
+    pub monthly_usd: f64,
+    /// Model router: a cheaper model for simple steps (compaction summaries, reviewer checks).
+    #[serde(default)]
+    pub cheap_model_ref: Option<String>,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Limits { max_steps: 10, max_run_secs: 30 * 60, max_run_tokens: 32_000, review: true }
+        Limits { max_steps: 10, max_run_secs: 30 * 60, max_run_tokens: 32_000, review: true, monthly_usd: 0.0, cheap_model_ref: None }
     }
 }
 
@@ -96,7 +102,8 @@ fn agent(r: sqlx::sqlite::SqliteRow) -> Result<Agent> {
         approval_rules: serde_json::from_str(r.get("approval_rules"))?,
         context_budget: r.get("context_budget"),
         limits: Limits { max_steps: r.get("max_steps"), max_run_secs: r.get("max_run_secs"),
-            max_run_tokens: r.get("max_run_tokens"), review: r.get("review") },
+            max_run_tokens: r.get("max_run_tokens"), review: r.get("review"), monthly_usd: r.get("monthly_usd"),
+            cheap_model_ref: r.get("cheap_model_ref") },
     })
 }
 
@@ -122,10 +129,10 @@ pub async fn create_agent(db: &SqlitePool, a: &Agent) -> Result<i64> {
     // Never reuse a deleted agent's id: the journal and model_calls outlive it (no FK), so a
     // reused id would inherit its history.
     let id = sqlx::query(
-        "INSERT INTO agents (id, name, role_prompt, model_ref, folders, allowed_domains, approval_rules, context_budget, max_steps, max_run_secs, max_run_tokens, review)
+        "INSERT INTO agents (id, name, role_prompt, model_ref, folders, allowed_domains, approval_rules, context_budget, max_steps, max_run_secs, max_run_tokens, review, monthly_usd, cheap_model_ref)
          VALUES ((SELECT MAX(m) + 1 FROM (SELECT COALESCE(MAX(id), 0) m FROM agents
            UNION ALL SELECT COALESCE(MAX(agent_id), 0) FROM actions UNION ALL SELECT COALESCE(MAX(agent_id), 0) FROM model_calls)),
-         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&a.name)
     .bind(&a.role_prompt)
@@ -135,6 +142,7 @@ pub async fn create_agent(db: &SqlitePool, a: &Agent) -> Result<i64> {
     .bind(serde_json::to_string(&a.approval_rules)?)
     .bind(a.context_budget)
     .bind(a.limits.max_steps).bind(a.limits.max_run_secs).bind(a.limits.max_run_tokens).bind(a.limits.review)
+    .bind(a.limits.monthly_usd).bind(&a.limits.cheap_model_ref)
     .execute(db)
         .await?
         .last_insert_rowid();
@@ -143,22 +151,24 @@ pub async fn create_agent(db: &SqlitePool, a: &Agent) -> Result<i64> {
 
 pub async fn update_permissions(db: &SqlitePool, a: &Agent) -> Result<()> {
     sqlx::query("UPDATE agents SET allowed_domains = ?, approval_rules = ?, context_budget = ?, model_ref = ?,
-                 max_steps = ?, max_run_secs = ?, max_run_tokens = ?, review = ? WHERE id = ?")
+                 max_steps = ?, max_run_secs = ?, max_run_tokens = ?, review = ?, monthly_usd = ?, cheap_model_ref = ? WHERE id = ?")
         .bind(serde_json::to_string(&a.allowed_domains)?)
         .bind(serde_json::to_string(&a.approval_rules)?)
         .bind(a.context_budget)
         .bind(&a.model_ref)
         .bind(a.limits.max_steps).bind(a.limits.max_run_secs).bind(a.limits.max_run_tokens).bind(a.limits.review)
+        .bind(a.limits.monthly_usd).bind(&a.limits.cheap_model_ref)
         .bind(a.id)
         .execute(db)
         .await?;
     Ok(())
 }
 
-pub async fn start_run(db: &SqlitePool, agent_id: i64, trigger: &str) -> Result<i64> {
-    Ok(sqlx::query("INSERT INTO runs (agent_id, trigger) VALUES (?, ?)")
+pub async fn start_run(db: &SqlitePool, agent_id: i64, trigger: &str, prompt: &str) -> Result<i64> {
+    Ok(sqlx::query("INSERT INTO runs (agent_id, trigger, prompt) VALUES (?, ?, ?)")
         .bind(agent_id)
         .bind(trigger)
+        .bind(prompt)
         .execute(db)
         .await?
         .last_insert_rowid())
@@ -238,10 +248,10 @@ pub async fn runs(db: &SqlitePool, agent_id: i64) -> Result<Vec<Value>> {
         "trigger": r.get::<String, _>("trigger")})).collect())
 }
 
-pub async fn add_model_call(db: &SqlitePool, agent_id: i64, run_id: i64, model: &str, usage: &Value, ms: i64) -> Result<()> {
-    sqlx::query("INSERT INTO model_calls (agent_id, run_id, model, prompt_tokens, completion_tokens, ms) VALUES (?, ?, ?, ?, ?, ?)")
+pub async fn add_model_call(db: &SqlitePool, agent_id: i64, run_id: i64, model: &str, usage: &Value, ms: i64, cost: Option<f64>) -> Result<()> {
+    sqlx::query("INSERT INTO model_calls (agent_id, run_id, model, prompt_tokens, completion_tokens, ms, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .bind(agent_id).bind(run_id).bind(model)
-        .bind(usage["prompt_tokens"].as_i64()).bind(usage["completion_tokens"].as_i64()).bind(ms)
+        .bind(usage["prompt_tokens"].as_i64()).bind(usage["completion_tokens"].as_i64()).bind(ms).bind(cost)
         .execute(db)
         .await?;
     Ok(())
@@ -251,7 +261,13 @@ pub async fn model_calls(db: &SqlitePool, agent_id: i64) -> Result<Vec<Value>> {
     let rows = sqlx::query("SELECT * FROM model_calls WHERE agent_id = ? ORDER BY id").bind(agent_id).fetch_all(db).await?;
     Ok(rows.iter().map(|r| serde_json::json!({"run_id": r.get::<i64, _>("run_id"), "model": r.get::<String, _>("model"),
         "prompt_tokens": r.get::<Option<i64>, _>("prompt_tokens"), "completion_tokens": r.get::<Option<i64>, _>("completion_tokens"),
-        "ms": r.get::<i64, _>("ms"), "created_at": r.get::<String, _>("created_at")})).collect())
+        "ms": r.get::<i64, _>("ms"), "cost_usd": r.get::<Option<f64>, _>("cost_usd"), "created_at": r.get::<String, _>("created_at")})).collect())
+}
+
+/// Cloud spend this calendar month (UTC), for the budget check and the cost meter.
+pub async fn month_cost(db: &SqlitePool, agent_id: i64) -> Result<f64> {
+    Ok(sqlx::query_scalar("SELECT COALESCE(SUM(cost_usd), 0.0) FROM model_calls WHERE agent_id = ? AND created_at >= strftime('%Y-%m-01', 'now')")
+        .bind(agent_id).fetch_one(db).await?)
 }
 
 #[cfg(test)]

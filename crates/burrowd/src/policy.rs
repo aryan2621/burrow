@@ -10,7 +10,8 @@ pub const TOOLS: [&str; 9] = ["list_dir", "read_file", "write_file", "delete_fil
     "notes_add", "notes_search", "web_search"];
 
 fn known(tool: &str) -> bool {
-    TOOLS.contains(&tool) || crate::connectors::TOOLS.contains(&tool) || tool.starts_with("mcp__")
+    TOOLS.contains(&tool) || crate::connectors::TOOLS.contains(&tool) || crate::rooms::TOOLS.contains(&tool)
+        || crate::artifacts::TOOLS.contains(&tool) || tool.starts_with("mcp__")
 }
 
 /// One click in the UI adds these, so pip, npm and git work in the sandbox.
@@ -31,6 +32,7 @@ pub fn default_rule(tool: &str) -> &'static str {
         "list_dir" | "read_file" | "write_file" | "notes_add" | "notes_search" | "web_search"
         | "email_search" | "email_read" | "email_move" | "calendar_list" | "calendar_create" | "calendar_update"
         | "github_issues" | "github_label" => "allow",
+        t if crate::rooms::TOOLS.contains(&t) || crate::artifacts::TOOLS.contains(&t) => "allow",
         _ => "ask",
     }
 }

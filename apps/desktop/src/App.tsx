@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Agent, rpc } from "./rpc";
+import { Agent, Room, rpc } from "./rpc";
 import AgentForm from "./AgentForm";
 import Chat from "./Chat";
 import Timeline from "./Timeline";
@@ -9,6 +9,8 @@ import Settings from "./Settings";
 import Onboarding from "./Onboarding";
 import { PermissionsTab } from "./Permissions";
 import Memory from "./Memory";
+import RoomView, { RoomForm } from "./Rooms";
+import Artifacts from "./Artifacts";
 
 const TABS = ["chat", "timeline", "schedules", "tools", "memory", "permissions"] as const;
 
@@ -17,7 +19,11 @@ export default function App() {
   const [selected, setSelected] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [tab, setTab] = useState<(typeof TABS)[number]>("chat");
-  const [view, setView] = useState<"agents" | "settings" | "onboarding" | null>(null);
+  const [view, setView] = useState<"agents" | "rooms" | "artifacts" | "settings" | "onboarding" | null>(null);
+  const [rooms, setRooms] = useState<Room[]>([]);
+  const [room, setRoom] = useState<number | null>(null);
+  const loadRooms = () => rpc<Room[]>("rooms.list").then(setRooms, () => {});
+  useEffect(() => void loadRooms(), []);
   const [sandbox, setSandbox] = useState<string | null | undefined>(undefined);
 
   const load = () => rpc<Agent[]>("agents.list").then(setAgents, (e) => setError(String(e)));
@@ -47,6 +53,18 @@ export default function App() {
             {a.name}
           </button>
         ))}
+        <p className="mt-4 px-2 text-xs uppercase text-stone-500">Rooms</p>
+        {rooms.map((r) => (
+          <button key={r.id} onClick={() => { setRoom(r.id); setView("rooms"); }}
+            className={`block w-full rounded px-2 py-1.5 text-left ${r.id === room && view === "rooms" ? "bg-stone-200 dark:bg-stone-800" : ""}`}>
+            # {r.name}
+          </button>
+        ))}
+        <button onClick={() => { setRoom(null); setView("rooms"); }} className="block w-full rounded px-2 py-1 text-left text-sm text-stone-500">+ New room</button>
+        <button onClick={() => setView("artifacts")}
+          className={`mt-4 block w-full rounded px-2 py-1.5 text-left text-sm ${view === "artifacts" ? "bg-stone-200 dark:bg-stone-800" : ""}`}>
+          Artifacts
+        </button>
         <button onClick={() => setView("settings")}
           className={`mt-4 block w-full rounded px-2 py-1.5 text-left text-sm ${view === "settings" ? "bg-stone-200 dark:bg-stone-800" : ""}`}>
           Settings
@@ -61,6 +79,14 @@ export default function App() {
       <main className="min-w-0 flex-1">
         {view === "settings" ? (
           <Settings />
+        ) : view === "artifacts" ? (
+          <Artifacts agents={agents} />
+        ) : view === "rooms" ? (
+          rooms.find((r) => r.id === room) ? (
+            <RoomView key={room} room={rooms.find((r) => r.id === room)!} agents={agents} onDeleted={() => { setRoom(null); loadRooms(); }} />
+          ) : (
+            <RoomForm agents={agents} onCreated={(id) => { loadRooms(); setRoom(id); }} />
+          )
         ) : agent ? (
           <div className="flex h-full flex-col">
             <div role="tablist" className="flex gap-4 border-b border-stone-200 px-4 text-sm dark:border-stone-700">
