@@ -1,6 +1,6 @@
 use crate::agent::{self, State};
 use crate::queue::Priority;
-use crate::{download, hardware, journal, mcp, models, policy, search, secrets, service, store};
+use crate::{download, hardware, journal, mcp, models, policy, schedule, search, secrets, service, store};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -126,6 +126,12 @@ fn budget(v: &Value) -> Result<Option<i64>> {
     }
 }
 
+/// UI preferences only; settings with their own validation (search) have their own RPCs.
+fn setting_key(k: &str) -> Result<&str> {
+    anyhow::ensure!(matches!(k, "onboarded"), "unknown setting `{k}`");
+    Ok(k)
+}
+
 fn rules(v: &Value) -> Result<std::collections::BTreeMap<String, String>> {
     let r = if v.is_null() { Default::default() } else { serde_json::from_value(v.clone()).context("bad approval_rules")? };
     policy::validate(&r)?;
@@ -207,7 +213,7 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
         "chat.history" => json!(store::messages(&st.db, id()?).await?),
         "chat.send" => {
             store::get_agent(&st.db, id()?).await?;
-            agent::spawn(st.clone(), id()?, s("text")?.into(), Priority::Interactive)?;
+            agent::spawn(st.clone(), id()?, s("text")?.into(), Priority::Interactive, "chat".into())?;
             json!(true)
         }
         "chat.busy" => json!(st.busy()),
@@ -236,6 +242,47 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
         }
         "mcp.remove" => {
             mcp::remove(&st.db, id()?, s("name")?).await?;
+            json!(true)
+        }
+        "settings.get" => {
+            let v: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?").bind(setting_key(s("key")?)?)
+                .fetch_optional(&st.db).await?;
+            json!(v)
+        }
+        "settings.set" => {
+            sqlx::query("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+                .bind(setting_key(s("key")?)?).bind(s("value")?).execute(&st.db).await?;
+            json!(true)
+        }
+        "service.install" => {
+            let home = st.home.clone();
+            tokio::task::spawn_blocking(move || service::register(&home)).await??;
+            // hand over after this reply: exit, then the service starts once the socket is free
+            st.handover.store(true, std::sync::atomic::Ordering::SeqCst);
+            let st2 = st.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                st2.shutdown.notify_one();
+            });
+            json!(true)
+        }
+        "service.uninstall" => {
+            // after the reply: if this daemon is the service, uninstalling stops it (the app restarts one)
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                let _ = tokio::task::spawn_blocking(service::uninstall).await;
+            });
+            json!(true)
+        }
+        "runs.list" => json!(store::runs(&st.db, id()?).await?),
+        "schedules.list" => json!(schedule::list(&st.db, id()?).await?),
+        "schedules.add" => json!(schedule::add(&st.db, p).await?),
+        "schedules.update" => {
+            schedule::update(&st.db, p).await?;
+            json!(true)
+        }
+        "schedules.delete" => {
+            schedule::delete(&st.db, int("id")?).await?;
             json!(true)
         }
         "approvals.pending" => json!(policy::pending(st).await?),

@@ -126,9 +126,10 @@ pub async fn update_permissions(db: &SqlitePool, a: &Agent) -> Result<()> {
     Ok(())
 }
 
-pub async fn start_run(db: &SqlitePool, agent_id: i64) -> Result<i64> {
-    Ok(sqlx::query("INSERT INTO runs (agent_id) VALUES (?)")
+pub async fn start_run(db: &SqlitePool, agent_id: i64, trigger: &str) -> Result<i64> {
+    Ok(sqlx::query("INSERT INTO runs (agent_id, trigger) VALUES (?, ?)")
         .bind(agent_id)
+        .bind(trigger)
         .execute(db)
         .await?
         .last_insert_rowid())
@@ -199,6 +200,13 @@ pub async fn compact_upto(db: &SqlitePool, agent_id: i64, last_id: i64) -> Resul
         .execute(db)
         .await?;
     Ok(())
+}
+
+pub async fn runs(db: &SqlitePool, agent_id: i64) -> Result<Vec<Value>> {
+    let rows = sqlx::query("SELECT * FROM runs WHERE agent_id = ? ORDER BY id DESC LIMIT 200").bind(agent_id).fetch_all(db).await?;
+    Ok(rows.iter().map(|r| serde_json::json!({"id": r.get::<i64, _>("id"), "started_at": r.get::<String, _>("started_at"),
+        "ended_at": r.get::<Option<String>, _>("ended_at"), "status": r.get::<String, _>("status"),
+        "trigger": r.get::<String, _>("trigger")})).collect())
 }
 
 pub async fn add_model_call(db: &SqlitePool, agent_id: i64, run_id: i64, model: &str, usage: &Value, ms: i64) -> Result<()> {

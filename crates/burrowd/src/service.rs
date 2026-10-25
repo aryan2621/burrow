@@ -47,37 +47,60 @@ fn home() -> Result<PathBuf> {
     dirs::home_dir().context("no home dir")
 }
 
+fn uid() -> Result<String> {
+    Ok(String::from_utf8(Command::new("id").arg("-u").output()?.stdout)?.trim().to_string())
+}
+
+fn plist_path() -> Result<PathBuf> {
+    Ok(home()?.join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
+}
+
+/// Register and start the service (`burrowd install`).
 pub fn install(burrow_home: &Path) -> Result<()> {
+    register(burrow_home)?;
+    start()
+}
+
+/// Write the service definition so it runs at every login, without starting it now.
+pub fn register(burrow_home: &Path) -> Result<()> {
     let exe = std::env::current_exe()?.canonicalize()?;
     let path_env = std::env::var("PATH").unwrap_or_default();
     if cfg!(target_os = "macos") {
-        let plist = home()?.join("Library/LaunchAgents").join(format!("{LABEL}.plist"));
+        let plist = plist_path()?;
         std::fs::create_dir_all(plist.parent().unwrap())?;
         let _ = uninstall(); // replace an older install
         std::fs::write(&plist, launchd_plist(&exe, &burrow_home.join("burrowd.log"), &path_env))?;
-        let uid = String::from_utf8(Command::new("id").arg("-u").output()?.stdout)?.trim().to_string();
-        run(Command::new("launchctl").args(["bootstrap", &format!("gui/{uid}")]).arg(&plist))?;
     } else if cfg!(target_os = "linux") {
         let unit = home()?.join(".config/systemd/user/burrowd.service");
         std::fs::create_dir_all(unit.parent().unwrap())?;
         std::fs::write(&unit, systemd_unit(&exe, &path_env))?;
         run(Command::new("systemctl").args(["--user", "daemon-reload"]))?;
-        run(Command::new("systemctl").args(["--user", "enable", "--now", "burrowd.service"]))?;
+        run(Command::new("systemctl").args(["--user", "enable", "burrowd.service"]))?;
     } else if cfg!(windows) {
         let tr = format!("\"{}\"", exe.display());
         run(Command::new("schtasks").args(["/Create", "/F", "/TN", r"Burrow\burrowd", "/SC", "ONLOGON", "/RL", "LIMITED", "/TR", &tr]))?;
-        run(Command::new("schtasks").args(["/Run", "/TN", r"Burrow\burrowd"]))?;
     } else {
         bail!("service install isn't supported on this OS");
     }
     Ok(())
 }
 
+/// Start the registered service now. A daemon handing over to the service calls this after
+/// it has released the socket.
+pub fn start() -> Result<()> {
+    if cfg!(target_os = "macos") {
+        run(Command::new("launchctl").args(["bootstrap", &format!("gui/{}", uid()?)]).arg(plist_path()?))
+    } else if cfg!(target_os = "linux") {
+        run(Command::new("systemctl").args(["--user", "start", "burrowd.service"]))
+    } else {
+        run(Command::new("schtasks").args(["/Run", "/TN", r"Burrow\burrowd"]))
+    }
+}
+
 pub fn uninstall() -> Result<()> {
     if cfg!(target_os = "macos") {
         let plist = home()?.join("Library/LaunchAgents").join(format!("{LABEL}.plist"));
-        let uid = String::from_utf8(Command::new("id").arg("-u").output()?.stdout)?.trim().to_string();
-        let _ = Command::new("launchctl").args(["bootout", &format!("gui/{uid}/{LABEL}")]).output();
+        let _ = Command::new("launchctl").args(["bootout", &format!("gui/{}/{LABEL}", uid()?)]).output();
         let _ = std::fs::remove_file(plist);
     } else if cfg!(target_os = "linux") {
         let _ = Command::new("systemctl").args(["--user", "disable", "--now", "burrowd.service"]).output();

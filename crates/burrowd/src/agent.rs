@@ -29,6 +29,11 @@ pub struct State {
     pub home: PathBuf,
     pub sandbox: Sandbox,
     pub running: Mutex<HashMap<i64, AbortHandle>>,
+    /// agent id → the one schedule firing (trigger, prompt) waiting for its current run to end
+    pub queued_fire: Mutex<HashMap<i64, (String, String)>>,
+    /// Ask `main` to shut down; with `handover` set it then starts the login service.
+    pub shutdown: tokio::sync::Notify,
+    pub handover: std::sync::atomic::AtomicBool,
     /// approval id → (agent id, answer channel)
     pub pending: Mutex<HashMap<i64, (i64, oneshot::Sender<bool>)>>,
     pub vault: Vault,
@@ -47,7 +52,7 @@ impl State {
         let llama_slots = if llama.managed() { llama::PARALLEL } else { slots("BURROW_LLAMA_SLOTS", 4) };
         Ok(State {
             db, http: reqwest::Client::new(), events: broadcast::channel(1024).0, ollama_url, llama, downloads: Default::default(),
-            home, sandbox, running: Default::default(), pending: Default::default(), vault,
+            home, sandbox, running: Default::default(), queued_fire: Default::default(), shutdown: Default::default(), handover: Default::default(), pending: Default::default(), vault,
             ollama_q: Queue::new(slots("OLLAMA_NUM_PARALLEL", 1)), llama_q: Queue::new(llama_slots),
         })
     }
@@ -142,9 +147,9 @@ async fn call_model(st: &State, agent_id: i64, run_id: i64, prio: Priority, mode
 }
 
 /// Handle one user message to completion: model → tools → model … until a plain reply.
-pub async fn run(st: Arc<State>, agent_id: i64, text: &str, prio: Priority) -> Result<()> {
+pub async fn run(st: Arc<State>, agent_id: i64, text: &str, prio: Priority, trigger: &str) -> Result<()> {
     let agent = store::get_agent(&st.db, agent_id).await?;
-    let run_id = store::start_run(&st.db, agent_id).await?;
+    let run_id = store::start_run(&st.db, agent_id, trigger).await?;
     let bound = Arc::new(secrets::for_agent(&st.db, &st.vault, agent_id).await?);
     let scratch = st.scratch(agent_id)?;
     let mut folders = agent.folders.clone();
@@ -222,18 +227,26 @@ pub async fn run(st: Arc<State>, agent_id: i64, text: &str, prio: Priority) -> R
     bail!("stopped after {MAX_STEPS} steps")
 }
 
-/// Start a run in the background so it outlives the client that asked for it.
-pub fn spawn(st: Arc<State>, agent_id: i64, text: String, prio: Priority) -> Result<()> {
+/// Start a run in the background so it outlives the client that asked for it. When it ends,
+/// a schedule firing queued meanwhile starts next.
+pub fn spawn(st: Arc<State>, agent_id: i64, text: String, prio: Priority, trigger: String) -> Result<()> {
     let mut running = st.running.lock().unwrap();
     if running.contains_key(&agent_id) {
         bail!("agent {agent_id} is already running");
     }
     let st2 = st.clone();
     let h = tokio::spawn(async move {
-        let res = run(st2.clone(), agent_id, &text, prio).await;
+        let res = run(st2.clone(), agent_id, &text, prio, &trigger).await;
         let _ = store::end_runs(&st2.db, agent_id, if res.is_ok() { "done" } else { "failed" }).await;
-        st2.running.lock().unwrap().remove(&agent_id);
-        st2.emit("chat.done", json!({"agent_id": agent_id, "error": res.err().map(|e| format!("{e:#}"))}));
+        let next = {
+            let mut running = st2.running.lock().unwrap();
+            running.remove(&agent_id);
+            st2.queued_fire.lock().unwrap().remove(&agent_id)
+        };
+        st2.emit("chat.done", json!({"agent_id": agent_id, "trigger": trigger, "error": res.err().map(|e| format!("{e:#}"))}));
+        if let Some((trigger, text)) = next {
+            let _ = spawn(st2.clone(), agent_id, text, Priority::Background, trigger);
+        }
     });
     running.insert(agent_id, h.abort_handle());
     Ok(())
@@ -241,6 +254,7 @@ pub fn spawn(st: Arc<State>, agent_id: i64, text: String, prio: Priority) -> Res
 
 /// Kill switch: stop the run, refuse its pending approvals, unbind its secrets, tear down its sandbox.
 pub async fn kill(st: &State, agent_id: i64) -> Result<()> {
+    st.queued_fire.lock().unwrap().remove(&agent_id);
     let h = st.running.lock().unwrap().remove(&agent_id);
     if let Some(h) = &h {
         h.abort();
@@ -313,7 +327,7 @@ mod tests {
             allowed_domains: vec![], approval_rules: Default::default(), context_budget: 8_000 };
         let id = store::create_agent(&st.db, &a).await.unwrap();
 
-        run(st.clone(), id, "write hello", Priority::Interactive).await.unwrap();
+        run(st.clone(), id, "write hello", Priority::Interactive, "chat").await.unwrap();
 
         assert_eq!(std::fs::read_to_string(work.join("hello.txt")).unwrap(), "hi");
         let msgs = store::messages(&st.db, id).await.unwrap();
@@ -344,7 +358,7 @@ mod tests {
         let id = store::create_agent(&st.db, &a).await.unwrap();
 
         let mut ev = st.events.subscribe();
-        let run = tokio::spawn(run(st.clone(), id, "delete it", Priority::Interactive));
+        let run = tokio::spawn(run(st.clone(), id, "delete it", Priority::Interactive, "chat"));
         let approval = loop {
             let v = ev.recv().await.unwrap();
             if v["method"] == "approval.requested" { break v["params"]["approval_id"].as_i64().unwrap(); }
