@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { rpc } from "./rpc";
+import { pickFolder, rpc } from "./rpc";
 import Permissions, { Perms, splitDomains } from "./Permissions";
 
 export default function AgentForm({ onCreated }: { onCreated: (id: number) => void }) {
@@ -56,7 +56,7 @@ export default function AgentForm({ onCreated }: { onCreated: (id: number) => vo
       <label className="block">
         <span className="text-sm">Model</span>
         <select className={input} required value={f.model_ref} onChange={(e) => setF({ ...f, model_ref: e.target.value })}>
-          {models.length === 0 && <option value="">No models found — is Ollama running?</option>}
+          {models.length === 0 && <option value="">No models yet — download one in Settings, or start Ollama</option>}
           {models.map((m) => <option key={m}>{m}</option>)}
         </select>
       </label>
@@ -69,8 +69,14 @@ export default function AgentForm({ onCreated }: { onCreated: (id: number) => vo
       </div>
       <label className="block">
         <span className="text-sm">Folders the agent may use (absolute paths, comma-separated)</span>
-        <input className={input} required placeholder="/Users/me/Documents/notes" value={f.folders}
-          onChange={(e) => setF({ ...f, folders: e.target.value })} />
+        <div className="flex gap-2">
+          <input className={input} required placeholder="/Users/me/Documents/notes" value={f.folders}
+            onChange={(e) => setF({ ...f, folders: e.target.value })} />
+          <button type="button" className="shrink-0 rounded border border-stone-300 px-3 dark:border-stone-700"
+            onClick={async () => { const p = await pickFolder(); if (p) setF((f) => ({ ...f, folders: f.folders ? `${f.folders}, ${p}` : p })); }}>
+            Add…
+          </button>
+        </div>
       </label>
       <Permissions value={perms} onChange={setPerms} />
       {error && <p role="alert" className="text-sm text-red-600">{error}</p>}

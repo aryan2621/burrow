@@ -2,7 +2,10 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use tauri::Emitter;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Emitter, Manager, WindowEvent};
+use tauri_plugin_notification::NotificationExt;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -86,6 +89,44 @@ async fn rpc(method: String, params: Value) -> Result<Value, String> {
     Err("burrowd closed the connection".into())
 }
 
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+async fn agent_name(id: &Value) -> String {
+    let agents = rpc("agents.list".into(), json!({})).await.unwrap_or_default();
+    agents.as_array().into_iter().flatten().find(|a| &a["id"] == id)
+        .and_then(|a| a["name"].as_str().map(String::from)).unwrap_or_else(|| "An agent".into())
+}
+
+/// Desktop notifications for things that need the user while the window may be hidden.
+async fn notify(app: &AppHandle, v: &Value) {
+    let p = &v["params"];
+    let (title, body) = match v["method"].as_str() {
+        Some("approval.requested") => {
+            let what = if p["tool"] == "net" { format!("connect to {}", p["args"]["host"].as_str().unwrap_or("a site")) } else { format!("run {}", p["tool"].as_str().unwrap_or("a tool")) };
+            (format!("{} needs your approval", agent_name(&p["agent_id"]).await), format!("It wants to {what}."))
+        }
+        // interactive runs finish in front of the user; scheduled ones are worth a heads-up
+        Some("chat.done") if p["trigger"].as_str().is_some_and(|t| t != "chat") => {
+            let name = agent_name(&p["agent_id"]).await;
+            match p["error"].as_str() {
+                Some(e) => (format!("{name}'s scheduled run failed"), e.chars().take(120).collect()),
+                None => (format!("{name} finished a scheduled run"), "Open Burrow to see what it did.".into()),
+            }
+        }
+        Some("models.downloaded") => ("Model ready".into(), format!("{} finished downloading.", p["id"].as_str().unwrap_or("The model"))),
+        Some("models.download_failed") if p["error"] != "cancelled" =>
+            ("Model download failed".into(), p["error"].as_str().unwrap_or("").chars().take(120).collect()),
+        _ => return,
+    };
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
 /// Keep one connection open and re-emit daemon notifications as `burrow` events.
 async fn forward_events(app: tauri::AppHandle) {
     loop {
@@ -98,6 +139,7 @@ async fn forward_events(app: tauri::AppHandle) {
             let mut lines = BufReader::new(s).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                    notify(&app, &v).await;
                     let _ = app.emit("burrow", v);
                 }
             }
@@ -109,11 +151,38 @@ async fn forward_events(app: tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let open = MenuItem::with_id(app, "open", "Open Burrow", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit Burrow (agents keep running)", true, None::<&str>)?;
+            TrayIconBuilder::new()
+                .icon(app.default_window_icon().expect("bundle icon").clone())
+                .tooltip("Burrow")
+                .menu(&Menu::with_items(app, &[&open, &quit])?)
+                .on_menu_event(|app, e| match e.id.as_ref() {
+                    "open" => show_main(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .build(app)?;
             tauri::async_runtime::spawn(forward_events(app.handle().clone()));
             Ok(())
         })
+        // closing the window only hides it: the tray stays and notifications keep coming
+        .on_window_event(|w, e| {
+            if let WindowEvent::CloseRequested { api, .. } = e {
+                api.prevent_close();
+                let _ = w.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![rpc])
-        .run(tauri::generate_context!())
-        .expect("error while running burrow");
+        .build(tauri::generate_context!())
+        .expect("error while building burrow")
+        .run(|_app, _e| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _e {
+                show_main(_app); // dock click
+            }
+        });
 }

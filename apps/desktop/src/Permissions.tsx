@@ -1,4 +1,5 @@
-import { DEFAULT_RULES, Rule, TOOLS, rpc } from "./rpc";
+import { useState } from "react";
+import { Agent, DEFAULT_RULES, Rule, TOOLS, rpc, ui } from "./rpc";
 
 export type Perms = { allowed_domains: string; approval_rules: Record<string, Rule> };
 
@@ -54,3 +55,19 @@ export default function Permissions({ value, onChange }: { value: Perms; onChang
 }
 
 export const splitDomains = (s: string) => s.split(",").map((d) => d.trim()).filter(Boolean);
+
+/** The agent page's Permissions tab: edit and save allowed domains and rules. */
+export function PermissionsTab({ agent, onSaved }: { agent: Agent; onSaved: () => void }) {
+  const [perms, setPerms] = useState<Perms>({ allowed_domains: agent.allowed_domains.join(", "), approval_rules: agent.approval_rules });
+  const [msg, setMsg] = useState("");
+  const save = () =>
+    rpc("agents.update", { agent_id: agent.id, allowed_domains: splitDomains(perms.allowed_domains), approval_rules: perms.approval_rules })
+      .then(() => { setMsg("Saved"); onSaved(); }, (e) => setMsg(String(e)));
+  return (
+    <div className="h-full max-w-lg space-y-3 overflow-y-auto p-4">
+      <Permissions value={perms} onChange={setPerms} />
+      <button onClick={save} className={ui.primary}>Save</button>
+      {msg && <p role="status" className="text-sm">{msg}</p>}
+    </div>
+  );
+}
