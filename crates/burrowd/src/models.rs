@@ -10,8 +10,9 @@ pub fn parse_ref(model_ref: &str) -> Result<(&str, &str)> {
     }
 }
 
-/// Ollama models plus whatever llama-server has loaded. Unreachable backends are skipped.
-pub async fn list(http: &reqwest::Client, ollama: &str, llama: &str) -> Vec<String> {
+/// Ollama models plus downloaded built-in models (or, for an external llama-server, what it
+/// has loaded). Unreachable backends are skipped.
+pub async fn list(http: &reqwest::Client, ollama: &str, llama: &crate::llama::Llama, home: &std::path::Path) -> Vec<String> {
     let get = |url: String| async move {
         let v: Value = http.get(url).send().await.ok()?.json().await.ok()?;
         Some(v)
@@ -22,7 +23,10 @@ pub async fn list(http: &reqwest::Client, ollama: &str, llama: &str) -> Vec<Stri
             out.extend(m["name"].as_str().map(|n| format!("ollama:{n}")));
         }
     }
-    if let Some(v) = get(format!("{llama}/v1/models")).await {
+    if llama.managed() {
+        let installed = crate::hardware::catalog().into_iter().filter(|m| crate::download::installed(home, m));
+        out.extend(installed.map(|m| format!("llama:{}", m.id)));
+    } else if let Some(v) = get(format!("{}/v1/models", llama.url)).await {
         for m in v["data"].as_array().into_iter().flatten() {
             out.extend(m["id"].as_str().map(|n| format!("llama:{n}")));
         }
@@ -60,7 +64,9 @@ pub async fn chat(
         .post(format!("{base}/v1/chat/completions"))
         .json(&{
             let mut body = json!({"model": model, "messages": messages, "stream": true,
-                                  "stream_options": {"include_usage": true}});
+                                  "stream_options": {"include_usage": true},
+                                  // llama-server: reuse the KV cache of the slot holding the most similar prompt
+                                  "cache_prompt": true});
             if tools.as_array().is_some_and(|t| !t.is_empty()) {
                 body["tools"] = tools.clone();
             }
@@ -123,18 +129,4 @@ pub async fn chat(
         msg["tool_calls"] = json!(calls);
     }
     Ok((msg, usage))
-}
-
-/// Start `llama-server` if `BURROW_LLAMA_SERVER` and `BURROW_LLAMA_MODEL` are set.
-/// shortcut: configured by env vars; move to the settings UI with model downloads (v0.1).
-pub fn spawn_llama_server(port: u16) -> Result<Option<tokio::process::Child>> {
-    let (Ok(bin), Ok(gguf)) = (std::env::var("BURROW_LLAMA_SERVER"), std::env::var("BURROW_LLAMA_MODEL")) else {
-        return Ok(None);
-    };
-    let child = tokio::process::Command::new(bin)
-        .args(["--jinja", "-m", &gguf, "--port", &port.to_string(), "--host", "127.0.0.1"])
-        .kill_on_drop(true)
-        .spawn()
-        .context("starting llama-server")?;
-    Ok(Some(child))
 }

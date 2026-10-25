@@ -157,6 +157,7 @@ pub async fn recover(db: &SqlitePool) -> Result<()> {
 
 pub async fn delete_agent(db: &SqlitePool, id: i64) -> Result<()> {
     sqlx::query("DELETE FROM agents WHERE id = ?").bind(id).execute(db).await?;
+    sqlx::query("DELETE FROM notes WHERE agent_id = ?").bind(id).execute(db).await?; // FTS tables have no FKs
     Ok(())
 }
 

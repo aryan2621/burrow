@@ -6,7 +6,12 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use tokio::sync::oneshot;
 
-pub const TOOLS: [&str; 6] = ["list_dir", "read_file", "write_file", "delete_file", "shell", "http_fetch"];
+pub const TOOLS: [&str; 9] = ["list_dir", "read_file", "write_file", "delete_file", "shell", "http_fetch",
+    "notes_add", "notes_search", "web_search"];
+
+/// One click in the UI adds these, so pip, npm and git work in the sandbox.
+pub const PACKAGE_REGISTRIES: [&str; 6] = ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org",
+    "github.com", "codeload.github.com", "objects.githubusercontent.com"];
 
 #[derive(PartialEq, Debug)]
 pub enum Rule {
@@ -15,17 +20,18 @@ pub enum Rule {
     Deny,
 }
 
-/// Writes are undoable, so they run without asking; deletes, shell and new domains ask.
+/// Writes are undoable, so they run without asking; deletes, shell, new domains and MCP tools ask.
 pub fn default_rule(tool: &str) -> &'static str {
     match tool {
-        "list_dir" | "read_file" | "write_file" => "allow",
+        "list_dir" | "read_file" | "write_file" | "notes_add" | "notes_search" | "web_search" => "allow",
         _ => "ask",
     }
 }
 
 pub fn validate(rules: &std::collections::BTreeMap<String, String>) -> Result<()> {
     for (tool, r) in rules {
-        if !TOOLS.contains(&tool.as_str()) || !matches!(r.as_str(), "allow" | "ask" | "deny") {
+        let known = TOOLS.contains(&tool.as_str()) || tool.starts_with("mcp__");
+        if !known || !matches!(r.as_str(), "allow" | "ask" | "deny") {
             bail!("bad approval rule {tool}={r}");
         }
     }
@@ -33,9 +39,10 @@ pub fn validate(rules: &std::collections::BTreeMap<String, String>) -> Result<()
 }
 
 /// For `http_fetch` the rule covers hosts outside the allowlist; allowlisted hosts just run
-/// (unless the rule is `deny`).
-pub fn rule(agent: &store::Agent, tool: &str, args: &Value) -> Rule {
-    let r = agent.approval_rules.get(tool).map(String::as_str).unwrap_or(default_rule(tool));
+/// (unless the rule is `deny`). `read_only` MCP tools (`readOnlyHint`) default to allow.
+pub fn rule(agent: &store::Agent, tool: &str, args: &Value, read_only: bool) -> Rule {
+    let default = if read_only { "allow" } else { default_rule(tool) };
+    let r = agent.approval_rules.get(tool).map(String::as_str).unwrap_or(default);
     if tool == "http_fetch" && r != "deny" {
         let url = args["url"].as_str().unwrap_or("");
         // a bad URL fails inside the tool with a clear message; nothing to approve
@@ -74,7 +81,7 @@ pub async fn pending(st: &State) -> Result<Vec<Value>> {
 }
 
 /// `remember` turns an approval into a standing rule: the host joins the allowlist for
-/// `http_fetch`, otherwise the tool becomes `allow`.
+/// `http_fetch` and sandbox network (`net`) requests, otherwise the tool becomes `allow`.
 pub async fn decide(st: &State, approval_id: i64, allow: bool, remember: bool) -> Result<()> {
     let (agent_id, tx) = st.pending.lock().unwrap().remove(&approval_id).context("no such pending approval")?;
     let r = sqlx::query("SELECT tool, args FROM approvals WHERE id = ?").bind(approval_id).fetch_one(&st.db).await?;
@@ -87,6 +94,8 @@ pub async fn decide(st: &State, approval_id: i64, allow: bool, remember: bool) -
         if tool == "http_fetch" {
             let host = fetch::host_of(args["url"].as_str().unwrap_or(""), &a.allowed_domains)?;
             a.allowed_domains.push(host);
+        } else if tool == "net" {
+            a.allowed_domains.push(args["host"].as_str().context("bad net approval")?.to_string());
         } else {
             a.approval_rules.insert(tool, "allow".into());
         }
@@ -104,13 +113,17 @@ mod tests {
     fn rules() {
         let mut a = store::Agent { id: 1, name: "a".into(), role_prompt: "".into(), model_ref: "ollama:x".into(),
             folders: vec![], allowed_domains: vec!["example.com".into()], approval_rules: Default::default(), context_budget: 8_000 };
-        assert_eq!(rule(&a, "write_file", &json!({})), Rule::Allow);
-        assert_eq!(rule(&a, "shell", &json!({})), Rule::Ask);
-        assert_eq!(rule(&a, "http_fetch", &json!({"url": "https://docs.example.com"})), Rule::Allow);
-        assert_eq!(rule(&a, "http_fetch", &json!({"url": "https://other.org"})), Rule::Ask);
+        assert_eq!(rule(&a, "write_file", &json!({}), false), Rule::Allow);
+        assert_eq!(rule(&a, "shell", &json!({}), false), Rule::Ask);
+        assert_eq!(rule(&a, "http_fetch", &json!({"url": "https://docs.example.com"}), false), Rule::Allow);
+        assert_eq!(rule(&a, "http_fetch", &json!({"url": "https://other.org"}), false), Rule::Ask);
         a.approval_rules.insert("http_fetch".into(), "deny".into());
-        assert_eq!(rule(&a, "http_fetch", &json!({"url": "https://docs.example.com"})), Rule::Deny);
+        assert_eq!(rule(&a, "http_fetch", &json!({"url": "https://docs.example.com"}), false), Rule::Deny);
         a.approval_rules.insert("shell".into(), "allow".into());
-        assert_eq!(rule(&a, "shell", &json!({})), Rule::Allow);
+        assert_eq!(rule(&a, "shell", &json!({}), false), Rule::Allow);
+        assert_eq!(rule(&a, "mcp__fs__write", &json!({}), false), Rule::Ask);
+        assert_eq!(rule(&a, "mcp__fs__read", &json!({}), true), Rule::Allow);
+        a.approval_rules.insert("mcp__fs__read".into(), "deny".into());
+        assert_eq!(rule(&a, "mcp__fs__read", &json!({}), true), Rule::Deny);
     }
 }

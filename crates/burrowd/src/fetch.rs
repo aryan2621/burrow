@@ -1,7 +1,9 @@
 //! `http_fetch`: GET only, allowlisted hosts only, re-checked on every redirect.
 use anyhow::{bail, Context, Result};
 use futures_util::StreamExt;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::Url;
+use std::sync::Arc;
 use std::time::Duration;
 
 const MAX_BODY: usize = 100 * 1024;
@@ -17,7 +19,6 @@ pub fn allowed(list: &[String], host: &str) -> bool {
 
 /// Parse and return the host the user must approve. Local and IP-literal hosts are
 /// refused unless allowlisted verbatim.
-// shortcut: no DNS-rebinding check (a name resolving to 127.0.0.1); add a resolved-IP check with the egress proxy.
 pub fn host_of(url: &str, list: &[String]) -> Result<String> {
     let u = Url::parse(url).context("invalid URL")?;
     if !matches!(u.scheme(), "http" | "https") {
@@ -32,6 +33,24 @@ pub fn host_of(url: &str, list: &[String]) -> Result<String> {
     Ok(host)
 }
 
+/// Resolves names to public addresses only, so an allowlisted name can't be pointed at
+/// 127.0.0.1 or the LAN (DNS rebinding). Hosts allowlisted verbatim are exempt.
+pub struct PublicOnly(pub Vec<String>);
+
+impl Resolve for PublicOnly {
+    fn resolve(&self, name: Name) -> Resolving {
+        let exempt = self.0.iter().any(|d| d.eq_ignore_ascii_case(name.as_str()));
+        Box::pin(async move {
+            let addrs: Vec<_> = tokio::net::lookup_host((name.as_str(), 0)).await?
+                .filter(|a| exempt || crate::proxy::public(a.ip())).collect();
+            if addrs.is_empty() {
+                return Err(format!("{} resolves to a private address", name.as_str()).into());
+            }
+            Ok(Box::new(addrs.into_iter()) as Addrs)
+        })
+    }
+}
+
 /// Fetch `url`. `list` must already contain the host (allowlisted or approved for this call).
 /// `headers` carry injected secrets; redirects may then only stay on `secret_hosts`.
 pub async fn get(url: &str, list: Vec<String>, headers: Vec<(String, String)>, secret_hosts: Vec<String>) -> Result<String> {
@@ -39,6 +58,7 @@ pub async fn get(url: &str, list: Vec<String>, headers: Vec<(String, String)>, s
     let carrying = !headers.is_empty();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
+        .dns_resolver(Arc::new(PublicOnly(list.clone())))
         .redirect(reqwest::redirect::Policy::custom(move |a| {
             let host = a.url().host_str().unwrap_or("").to_string();
             if a.previous().len() >= 5 {
@@ -95,6 +115,13 @@ mod tests {
         assert!(host_of("file:///etc/passwd", &l).is_err());
         assert!(host_of("http://127.0.0.1/", &["127.0.0.1".into()]).is_ok());
         assert_eq!(host_of("https://Docs.Example.com/x", &l).unwrap(), "docs.example.com");
+    }
+
+    #[tokio::test]
+    async fn private_resolutions_are_refused() {
+        let name = |n: &str| n.parse::<Name>().unwrap();
+        assert!(PublicOnly(vec![]).resolve(name("localhost")).await.is_err());
+        assert!(PublicOnly(vec!["localhost".into()]).resolve(name("localhost")).await.is_ok());
     }
 
     /// Serves a redirect to `to` on /go (`@self` = this server via `localhost`), else a page.

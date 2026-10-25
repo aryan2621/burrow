@@ -31,24 +31,32 @@ pub fn scoped(folders: &[PathBuf], p: &str) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-pub fn specs() -> Value {
+/// Built-in tools; `web_search` only when a search backend is configured.
+pub fn specs(search: bool) -> Vec<Value> {
     let f = |name: &str, desc: &str, props: Value, req: &[&str]| {
         json!({"type": "function", "function": {"name": name, "description": desc,
             "parameters": {"type": "object", "properties": props, "required": req}}})
     };
     let path = json!({"type": "string", "description": "file or directory path"});
-    json!([
+    let mut out = vec![
         f("list_dir", "List entries of a directory", json!({"path": path}), &["path"]),
         f("read_file", "Read a UTF-8 text file", json!({"path": path}), &["path"]),
         f("write_file", "Create or overwrite a text file",
           json!({"path": path, "content": {"type": "string"}}), &["path", "content"]),
         f("delete_file", "Delete a file", json!({"path": path}), &["path"]),
-        f("shell", "Run a shell command in your isolated Linux sandbox (no network; your folders are \
-          read-only there, your scratch folder is writable and is the working directory)",
+        f("shell", "Run a shell command in your isolated Linux sandbox (has Python). Your folders \
+          are read-only there; your scratch folder is writable and is the working directory. Network goes \
+          through a proxy: allowed domains work (pip, npm, git, curl), new domains need the user's approval",
           json!({"command": {"type": "string"}}), &["command"]),
         f("http_fetch", "GET a web page or API (http/https). New domains need the user's approval",
           json!({"url": {"type": "string"}}), &["url"]),
-    ])
+        f("notes_add", "Save a note to your long-term notes", json!({"text": {"type": "string"}}), &["text"]),
+        f("notes_search", "Search your notes by keywords", json!({"query": {"type": "string"}}), &["query"]),
+    ];
+    if search {
+        out.push(f("web_search", "Search the web; returns titles, URLs and snippets", json!({"query": {"type": "string"}}), &["query"]));
+    }
+    out
 }
 
 /// What a tool returns: text for the model, plus how to undo it if that's possible.

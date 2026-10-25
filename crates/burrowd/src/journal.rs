@@ -125,6 +125,11 @@ pub async fn undo(db: &SqlitePool, snapshots: &Path, action_id: i64, force: bool
         bail!("action {action_id} is already undone");
     }
     let inv: Value = serde_json::from_str(&r.get::<Option<String>, _>("inverse").context("this action can't be undone")?)?;
+    if let Some(note) = inv["note_id"].as_i64() {
+        crate::notes::delete(db, note).await?;
+        sqlx::query("INSERT INTO undos (action_id) VALUES (?)").bind(action_id).execute(db).await?;
+        return Ok(());
+    }
     let path = PathBuf::from(inv["path"].as_str().context("bad inverse")?);
     if !force && current_hash(&path)? != inv["after_hash"].as_str().map(String::from) {
         bail!("{} changed after the agent touched it; undo with force to overwrite", path.display());

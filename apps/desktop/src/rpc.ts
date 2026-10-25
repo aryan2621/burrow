@@ -2,9 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
 export type Rule = "allow" | "ask" | "deny";
-export const TOOLS = ["list_dir", "read_file", "write_file", "delete_file", "shell", "http_fetch"] as const;
+export const TOOLS = ["list_dir", "read_file", "write_file", "delete_file", "shell", "http_fetch",
+  "notes_add", "notes_search", "web_search"] as const;
 export const DEFAULT_RULES: Record<string, Rule> = {
   list_dir: "allow", read_file: "allow", write_file: "allow", delete_file: "ask", shell: "ask", http_fetch: "ask",
+  notes_add: "allow", notes_search: "allow", web_search: "allow",
 };
 
 export type Agent = {

@@ -1,12 +1,19 @@
 mod agent;
 mod compact;
+mod download;
 mod fetch;
+mod hardware;
 mod journal;
+mod llama;
+mod mcp;
 mod models;
+mod notes;
 mod policy;
+mod proxy;
 mod queue;
 mod rpc;
 mod sandbox;
+mod search;
 mod secrets;
 mod service;
 mod store;
@@ -47,13 +54,12 @@ async fn main() -> Result<()> {
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700))?;
     }
 
-    let _llama = models::spawn_llama_server(8080)?;
     let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.into());
     let sandbox = sandbox::Sandbox::detect();
     eprintln!("sandbox runtime: {}", sandbox.bin.as_deref().unwrap_or("none (shell tool disabled)"));
     let vault = secrets::Vault::detect(&home).await;
     let st = Arc::new(agent::State::new(home.clone(), env("BURROW_OLLAMA_URL", "http://127.0.0.1:11434"),
-        env("BURROW_LLAMA_URL", "http://127.0.0.1:8080"), sandbox, vault).await?);
+        env("BURROW_LLAMA_URL", ""), sandbox, vault).await?);
 
     let idle = st.clone();
     tokio::spawn(async move {
@@ -67,6 +73,7 @@ async fn main() -> Result<()> {
         _ = shutdown_signal() => Ok(()),
     };
     st.sandbox.stop_all().await;
+    st.llama.stop().await;
     res
 }
 

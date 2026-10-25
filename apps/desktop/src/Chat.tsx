@@ -79,12 +79,14 @@ export default function Chat({ agent, onDeleted }: { agent: Agent; onDeleted: ()
         {approvals.map((a) => (
           <div key={a.approval_id} role="alertdialog" aria-label="Approval needed"
             className="rounded border border-amber-600 bg-amber-50 p-3 dark:bg-amber-950">
-            <p className="text-sm font-semibold">{agent.name} wants to run {a.tool}</p>
+            <p className="text-sm font-semibold">
+              {a.tool === "net" ? `${agent.name}'s sandbox wants to connect to ${a.args.host}` : `${agent.name} wants to run ${a.tool}`}
+            </p>
             <pre className="my-2 max-h-40 overflow-auto whitespace-pre-wrap text-xs">{JSON.stringify(a.args, null, 2)}</pre>
             <div className="flex gap-2 text-sm">
               <button onClick={() => decide(a, true)} className="rounded bg-amber-800 px-3 py-1 text-white">Allow once</button>
               <button onClick={() => decide(a, true, true)} className="rounded border border-amber-800 px-3 py-1">
-                {a.tool === "http_fetch" ? "Always allow this site" : "Always allow"}
+                {a.tool === "http_fetch" || a.tool === "net" ? "Always allow this site" : "Always allow"}
               </button>
               <button onClick={() => decide(a, false)} className="rounded px-3 py-1 text-red-700">Deny</button>
             </div>

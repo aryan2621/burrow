@@ -1,6 +1,6 @@
 use crate::agent::{self, State};
 use crate::queue::Priority;
-use crate::{journal, models, policy, secrets, service, store};
+use crate::{download, hardware, journal, mcp, models, policy, search, secrets, service, store};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -138,8 +138,32 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
     let id = || int("agent_id");
     Ok(match method {
         "status" => json!({"sandbox": st.sandbox.bin, "service_installed": service::installed().unwrap_or(false),
-            "keystore": match st.vault { secrets::Vault::Keychain => "keychain", secrets::Vault::File(_) => "file" }}),
-        "models.list" => json!(models::list(&st.http, &st.ollama_url, &st.llama_url).await),
+            "keystore": match st.vault { secrets::Vault::Keychain => "keychain", secrets::Vault::File(_) => "file" },
+            "search": search::name(&search::backend(&st.db, &st.vault).await?)}),
+        "search.configure" => {
+            search::configure(&st.db, &st.vault, p).await?;
+            json!(true)
+        }
+        "domains.presets" => json!({"package_registries": policy::PACKAGE_REGISTRIES}),
+        "models.list" => json!(models::list(&st.http, &st.ollama_url, &st.llama, &st.home).await),
+        "hardware.detect" => hardware::detect(),
+        "models.catalog" => {
+            let busy: Vec<String> = st.downloads.ids();
+            json!(hardware::catalog().into_iter().map(|m| {
+                let mut v = json!(m);
+                v["installed"] = json!(download::installed(&st.home, &m));
+                v["downloading"] = json!(busy.contains(&m.id));
+                v
+            }).collect::<Vec<_>>())
+        }
+        "models.download" => {
+            download::start(st, s("id")?)?;
+            json!(true)
+        }
+        "models.cancel" => {
+            download::cancel(st, s("id")?)?;
+            json!(true)
+        }
         "models.pull" => {
             models::pull(&st.http, &st.ollama_url, s("name")?).await?;
             json!(true)
@@ -202,6 +226,16 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
         "secrets.list" => json!(secrets::list(&st.db).await?),
         "secrets.delete" => {
             secrets::delete(&st.db, &st.vault, s("name")?).await?;
+            json!(true)
+        }
+        "mcp.list" => json!(mcp::list(&st.db, id()?).await?),
+        "mcp.add" => {
+            store::get_agent(&st.db, id()?).await?;
+            mcp::add(&st.db, p).await?;
+            json!(true)
+        }
+        "mcp.remove" => {
+            mcp::remove(&st.db, id()?, s("name")?).await?;
             json!(true)
         }
         "approvals.pending" => json!(policy::pending(st).await?),
