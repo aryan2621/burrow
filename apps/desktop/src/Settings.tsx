@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Agent, CatalogModel, Hardware, Secret, Status, rpc, ui } from "./rpc";
+import { Agent, CatalogModel, Hardware, Providers, Secret, Status, pickFile, pickSavePath, rpc, ui } from "./rpc";
 import useDownloads from "./useDownloads";
 
 const gb = (b: number) => `${(b / 2 ** 30).toFixed(1)} GB`;
@@ -54,6 +54,74 @@ function Search({ status, reload }: { status: Status; reload: () => void }) {
         <input aria-label="Brave Search API key" type="password" className={ui.input} placeholder="Brave Search API key (stored in the keychain)" value={key} onChange={(e) => setKey(e.target.value)} />
         <button className={ui.button} disabled={!key} onClick={() => set({ brave_key: key })}>Save</button>
         <button className={ui.button} onClick={() => set({ brave_key: null })}>Clear</button>
+      </div>
+      {msg && <p role="status">{msg}</p>}
+    </div>
+  );
+}
+
+function Cloud() {
+  const [p, setP] = useState<Providers | null>(null);
+  const [keys, setKeys] = useState({ anthropic: "", openai: "", base_url: "" });
+  const [msg, setMsg] = useState("");
+  const load = () => rpc<Providers>("providers.list").then(setP, (e) => setMsg(String(e)));
+  useEffect(() => void load(), []);
+  const set = (body: object) => rpc("providers.set", body).then(() => { setMsg("Saved"); setKeys({ anthropic: "", openai: "", base_url: "" }); load(); }, (e) => setMsg(String(e)));
+  if (!p) return null;
+  return (
+    <div className="space-y-2 text-sm">
+      <p className="text-stone-500">Off until you add a key. Only agents you switch to a cloud model use it; their messages and tool results then go to that provider.</p>
+      <div className="flex gap-2">
+        <input aria-label="Anthropic API key" type="password" className={ui.input} value={keys.anthropic}
+          placeholder={p.anthropic.configured ? "Anthropic key saved" : "Anthropic API key (stored in the keychain)"}
+          onChange={(e) => setKeys({ ...keys, anthropic: e.target.value })} />
+        <button className={ui.button} disabled={!keys.anthropic} onClick={() => set({ provider: "anthropic", api_key: keys.anthropic })}>Save</button>
+        <button className={ui.button} onClick={() => set({ provider: "anthropic", api_key: null })}>Clear</button>
+      </div>
+      <div className="flex gap-2">
+        <input aria-label="OpenAI-compatible API key" type="password" className={ui.input} value={keys.openai}
+          placeholder={p.openai.configured ? "OpenAI-compatible key saved" : "OpenAI-compatible API key"}
+          onChange={(e) => setKeys({ ...keys, openai: e.target.value })} />
+        <button className={ui.button} disabled={!keys.openai} onClick={() => set({ provider: "openai", api_key: keys.openai })}>Save</button>
+        <button className={ui.button} onClick={() => set({ provider: "openai", api_key: null })}>Clear</button>
+      </div>
+      <div className="flex gap-2">
+        <input aria-label="OpenAI-compatible base URL" className={ui.input} value={keys.base_url}
+          placeholder={`Base URL (now ${p.openai.base_url ?? "https://api.openai.com/v1"})`}
+          onChange={(e) => setKeys({ ...keys, base_url: e.target.value })} />
+        <button className={ui.button} disabled={!keys.base_url} onClick={() => set({ provider: "openai", base_url: keys.base_url })}>Save</button>
+        <button className={ui.button} onClick={() => set({ provider: "openai", base_url: null })}>Reset</button>
+      </div>
+      {msg && <p role="status">{msg}</p>}
+    </div>
+  );
+}
+
+function Data() {
+  const [pass, setPass] = useState("");
+  const [msg, setMsg] = useState("");
+  const run = (f: () => Promise<unknown>, done: string) => { setMsg("Working…"); f().then(() => setMsg(done), (e) => setMsg(String(e))); };
+  const exportTo = async () => {
+    const path = await pickSavePath(`burrow-${new Date().toISOString().slice(0, 10)}.burrow`);
+    if (path) run(() => rpc("backup.export", { path, passphrase: pass }), `Saved to ${path}`);
+  };
+  const importFrom = async () => {
+    const path = await pickFile();
+    if (path && confirm("Replace all agents, history and undo snapshots with this backup?"))
+      run(() => rpc("backup.import", { path, passphrase: pass }), "Imported. Burrow is restarting.");
+  };
+  const wipe = () => {
+    if (prompt("This deletes all agents, history, notes, snapshots, scratch folders and stored keys. Type wipe to confirm.") === "wipe")
+      run(() => rpc("data.wipe", { confirm: "wipe" }), "Wiped. Burrow is restarting.");
+  };
+  return (
+    <div className="space-y-2 text-sm">
+      <p className="text-stone-500">A backup is one file encrypted with your passphrase: agents, history, notes, schedules and undo snapshots. Keychain secrets and API keys aren't included.</p>
+      <input aria-label="Backup passphrase" type="password" className={ui.input} placeholder="Passphrase (8+ characters)" value={pass} onChange={(e) => setPass(e.target.value)} />
+      <div className="flex gap-2">
+        <button className={ui.button} disabled={pass.length < 8} onClick={exportTo}>Export…</button>
+        <button className={ui.button} disabled={pass.length < 8} onClick={importFrom}>Import…</button>
+        <button className={`${ui.button} text-red-700`} onClick={wipe}>Wipe all data</button>
       </div>
       {msg && <p role="status">{msg}</p>}
     </div>
@@ -142,7 +210,9 @@ export default function Settings() {
       {status && (
         <>
           <section className={section}><h3 className="font-semibold">Web search</h3><Search status={status} reload={reload} /></section>
+          <section className={section}><h3 className="font-semibold">Cloud models</h3><Cloud /></section>
           <section className={section}><h3 className="font-semibold">Secrets</h3><Secrets /></section>
+          <section className={section}><h3 className="font-semibold">Backup and data</h3><Data /></section>
           <section className={section}>
             <h3 className="font-semibold">Background</h3>
             <LoginToggle status={status} reload={reload} />

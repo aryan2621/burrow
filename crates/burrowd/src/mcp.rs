@@ -306,7 +306,7 @@ for line in sys.stdin:
         let tmp = tempfile::tempdir().unwrap();
         let st = Arc::new(State::new(tmp.path().to_path_buf(), String::new(), String::new(), Sandbox::detect(), Vault::File(tmp.path().join("keys"))).await.unwrap());
         let mut a = store::Agent { id: 0, name: "m".into(), role_prompt: "".into(), model_ref: "ollama:x".into(), folders: vec![],
-            allowed_domains: policy::PACKAGE_REGISTRIES.iter().map(|d| d.to_string()).collect(), approval_rules: Default::default(), context_budget: 8_000 };
+            allowed_domains: policy::PACKAGE_REGISTRIES.iter().map(|d| d.to_string()).collect(), approval_rules: Default::default(), context_budget: 8_000, limits: Default::default() };
         a.id = store::create_agent(&st.db, &a).await.unwrap();
         add(&st.db, &json!({"agent_id": a.id, "name": "everything", "transport": "stdio",
             "command": ["npx", "-y", "@modelcontextprotocol/server-everything"]})).await.unwrap();

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
 export type Rule = "allow" | "ask" | "deny";
 export const TOOLS = ["list_dir", "read_file", "write_file", "delete_file", "shell", "http_fetch",
@@ -12,8 +12,11 @@ export const DEFAULT_RULES: Record<string, Rule> = {
 
 export type Agent = {
   id: number; name: string; role_prompt: string; model_ref: string; folders: string[];
-  allowed_domains: string[]; approval_rules: Record<string, Rule>;
+  allowed_domains: string[]; approval_rules: Record<string, Rule>; context_budget: number; limits: Limits;
 };
+export type Limits = { max_steps: number; max_run_secs: number; max_run_tokens: number; review: boolean };
+export type Note = { id: number; text: string; created_at: string };
+export type Providers = Record<"anthropic" | "openai", { configured: boolean; base_url?: string }>;
 export type Message = {
   role: "user" | "assistant" | "tool" | "system";
   content: string;
@@ -53,6 +56,13 @@ export const pickFolder = async () => {
   const r = await open({ directory: true });
   return typeof r === "string" ? r : null;
 };
+
+export const pickFile = async () => {
+  const r = await open({ directory: false });
+  return typeof r === "string" ? r : null;
+};
+
+export const pickSavePath = (defaultPath: string) => save({ defaultPath });
 
 export const ui = {
   input: "w-full rounded border border-stone-300 bg-white px-2 py-1 dark:border-stone-700 dark:bg-stone-800",

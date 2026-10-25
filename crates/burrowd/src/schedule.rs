@@ -220,7 +220,7 @@ mod tests {
         let work = tmp.join("work");
         std::fs::create_dir_all(&work).unwrap();
         let a = store::Agent { id: 0, name: "s".into(), role_prompt: "".into(), model_ref: "ollama:x".into(), folders: vec![work.canonicalize().unwrap()],
-            allowed_domains: vec![], approval_rules: Default::default(), context_budget: 8_000 };
+            allowed_domains: vec![], approval_rules: Default::default(), context_budget: 8_000, limits: store::Limits { review: false, ..Default::default() } };
         let id = store::create_agent(&st.db, &a).await.unwrap();
         (st, id, work.canonicalize().unwrap())
     }

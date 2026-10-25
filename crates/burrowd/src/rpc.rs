@@ -1,6 +1,6 @@
 use crate::agent::{self, State};
 use crate::queue::Priority;
-use crate::{download, hardware, journal, mcp, models, policy, schedule, search, secrets, service, store};
+use crate::{backup, download, notes, hardware, journal, mcp, models, policy, schedule, search, secrets, service, store};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -139,6 +139,19 @@ fn budget(v: &Value) -> Result<Option<i64>> {
     }
 }
 
+/// Fields given in `v` override `cur`.
+fn limits(v: &Value, cur: store::Limits) -> Result<store::Limits> {
+    let mut m = serde_json::to_value(cur)?;
+    for (k, x) in v.as_object().into_iter().flatten() {
+        m[k] = x.clone();
+    }
+    let l: store::Limits = serde_json::from_value(m).context("bad limits")?;
+    anyhow::ensure!((1..=200).contains(&l.max_steps), "max_steps must be 1–200");
+    anyhow::ensure!((10..=24 * 3600).contains(&l.max_run_secs), "max_run_secs must be 10–86400");
+    anyhow::ensure!((1_000..=10_000_000).contains(&l.max_run_tokens), "max_run_tokens must be 1000–10000000");
+    Ok(l)
+}
+
 /// UI preferences only; settings with their own validation (search) have their own RPCs.
 fn setting_key(k: &str) -> Result<&str> {
     anyhow::ensure!(matches!(k, "onboarded"), "unknown setting `{k}`");
@@ -164,7 +177,38 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
             json!(true)
         }
         "domains.presets" => json!({"package_registries": policy::PACKAGE_REGISTRIES}),
-        "models.list" => json!(models::list(&st.http, &st.ollama_url, &st.llama, &st.home).await),
+        "models.list" => {
+            let mut m = models::list(&st.http, &st.ollama_url, &st.llama, &st.home).await;
+            m.extend(models::cloud(&st.http, &st.db, &st.vault).await);
+            json!(m)
+        }
+        "providers.list" => models::providers(&st.db, &st.vault).await?,
+        "providers.set" => {
+            models::configure(&st.db, &st.vault, p).await?;
+            json!(true)
+        }
+        "notes.list" => json!(notes::list(&st.db, id()?, p["query"].as_str().unwrap_or("")).await?),
+        "notes.update" => {
+            notes::update(&st.db, id()?, int("note_id")?, s("text")?).await?;
+            json!(true)
+        }
+        "notes.delete" => {
+            notes::delete(&st.db, int("note_id")?).await?;
+            json!(true)
+        }
+        "backup.export" => {
+            backup::export(st, Path::new(s("path")?), s("passphrase")?).await?;
+            json!(true)
+        }
+        "backup.import" => {
+            backup::import(st, Path::new(s("path")?), s("passphrase")?).await?;
+            json!(true)
+        }
+        "data.wipe" => {
+            anyhow::ensure!(p["confirm"] == "wipe", "pass confirm: \"wipe\"");
+            backup::wipe(st).await?;
+            json!(true)
+        }
         "hardware.detect" => hardware::detect(),
         "models.catalog" => {
             let busy: Vec<String> = st.downloads.ids();
@@ -201,7 +245,7 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
             let a = store::Agent { id: 0, name: s("name")?.into(), role_prompt: s("role_prompt")?.into(),
                 model_ref: s("model_ref")?.into(), folders,
                 allowed_domains: domains(&p["allowed_domains"])?, approval_rules: rules(&p["approval_rules"])?,
-                context_budget: budget(&p["context_budget"])?.unwrap_or(8_000) };
+                context_budget: budget(&p["context_budget"])?.unwrap_or(8_000), limits: limits(&p["limits"], Default::default())? };
             json!(store::create_agent(&st.db, &a).await?)
         }
         "agents.update" => {
@@ -210,6 +254,11 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
             a.approval_rules = rules(&p["approval_rules"])?;
             if let Some(b) = budget(&p["context_budget"])? {
                 a.context_budget = b;
+            }
+            a.limits = limits(&p["limits"], a.limits)?;
+            if let Some(m) = p["model_ref"].as_str() {
+                models::parse_ref(m)?;
+                a.model_ref = m.into();
             }
             store::update_permissions(&st.db, &a).await?;
             json!(true)

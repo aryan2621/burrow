@@ -18,6 +18,24 @@ pub struct Agent {
     pub approval_rules: BTreeMap<String, String>,
     /// Estimated tokens of history sent to the model before compaction kicks in.
     pub context_budget: i64,
+    pub limits: Limits,
+}
+
+/// Runaway limits per run, checked before each model call (a pending approval doesn't get cut off).
+#[derive(Serialize, serde::Deserialize, Clone)]
+pub struct Limits {
+    pub max_steps: i64,
+    pub max_run_secs: i64,
+    /// Output tokens summed over the run's model calls.
+    pub max_run_tokens: i64,
+    /// A second model call checks auto-allowed side effects against the request.
+    pub review: bool,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits { max_steps: 10, max_run_secs: 30 * 60, max_run_tokens: 32_000, review: true }
+    }
 }
 
 /// Open the SQLCipher-encrypted DB with a hex `key`, encrypting a plaintext DB from
@@ -77,6 +95,8 @@ fn agent(r: sqlx::sqlite::SqliteRow) -> Result<Agent> {
         allowed_domains: serde_json::from_str(r.get("allowed_domains"))?,
         approval_rules: serde_json::from_str(r.get("approval_rules"))?,
         context_budget: r.get("context_budget"),
+        limits: Limits { max_steps: r.get("max_steps"), max_run_secs: r.get("max_run_secs"),
+            max_run_tokens: r.get("max_run_tokens"), review: r.get("review") },
     })
 }
 
@@ -102,10 +122,10 @@ pub async fn create_agent(db: &SqlitePool, a: &Agent) -> Result<i64> {
     // Never reuse a deleted agent's id: the journal and model_calls outlive it (no FK), so a
     // reused id would inherit its history.
     let id = sqlx::query(
-        "INSERT INTO agents (id, name, role_prompt, model_ref, folders, allowed_domains, approval_rules, context_budget)
+        "INSERT INTO agents (id, name, role_prompt, model_ref, folders, allowed_domains, approval_rules, context_budget, max_steps, max_run_secs, max_run_tokens, review)
          VALUES ((SELECT MAX(m) + 1 FROM (SELECT COALESCE(MAX(id), 0) m FROM agents
            UNION ALL SELECT COALESCE(MAX(agent_id), 0) FROM actions UNION ALL SELECT COALESCE(MAX(agent_id), 0) FROM model_calls)),
-         ?, ?, ?, ?, ?, ?, ?)",
+         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&a.name)
     .bind(&a.role_prompt)
@@ -114,6 +134,7 @@ pub async fn create_agent(db: &SqlitePool, a: &Agent) -> Result<i64> {
     .bind(serde_json::to_string(&a.allowed_domains)?)
     .bind(serde_json::to_string(&a.approval_rules)?)
     .bind(a.context_budget)
+    .bind(a.limits.max_steps).bind(a.limits.max_run_secs).bind(a.limits.max_run_tokens).bind(a.limits.review)
     .execute(db)
         .await?
         .last_insert_rowid();
@@ -121,10 +142,13 @@ pub async fn create_agent(db: &SqlitePool, a: &Agent) -> Result<i64> {
 }
 
 pub async fn update_permissions(db: &SqlitePool, a: &Agent) -> Result<()> {
-    sqlx::query("UPDATE agents SET allowed_domains = ?, approval_rules = ?, context_budget = ? WHERE id = ?")
+    sqlx::query("UPDATE agents SET allowed_domains = ?, approval_rules = ?, context_budget = ?, model_ref = ?,
+                 max_steps = ?, max_run_secs = ?, max_run_tokens = ?, review = ? WHERE id = ?")
         .bind(serde_json::to_string(&a.allowed_domains)?)
         .bind(serde_json::to_string(&a.approval_rules)?)
         .bind(a.context_budget)
+        .bind(&a.model_ref)
+        .bind(a.limits.max_steps).bind(a.limits.max_run_secs).bind(a.limits.max_run_tokens).bind(a.limits.review)
         .bind(a.id)
         .execute(db)
         .await?;

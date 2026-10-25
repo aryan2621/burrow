@@ -1,4 +1,6 @@
 mod agent;
+mod awake;
+mod backup;
 mod compact;
 mod download;
 mod fetch;
@@ -73,6 +75,7 @@ async fn main() -> Result<()> {
         env("BURROW_LLAMA_URL", ""), sandbox, vault).await?);
 
     tokio::spawn(schedule::run(st.clone()));
+    tokio::spawn(awake::run(st.clone()));
     let idle = st.clone();
     tokio::spawn(async move {
         loop {

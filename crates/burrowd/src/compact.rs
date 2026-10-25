@@ -128,7 +128,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = crate::store::open(&tmp.path().join("t.db"), &"ab".repeat(32)).await.unwrap();
         let a = crate::store::Agent { id: 0, name: "a".into(), role_prompt: "".into(), model_ref: "ollama:x".into(),
-            folders: vec![], allowed_domains: vec![], approval_rules: Default::default(), context_budget: 1_000 };
+            folders: vec![], allowed_domains: vec![], approval_rules: Default::default(), context_budget: 1_000, limits: Default::default() };
         let id = crate::store::create_agent(&db, &a).await.unwrap();
         for i in 0..20 {
             let role = if i % 2 == 0 { "user" } else { "assistant" };

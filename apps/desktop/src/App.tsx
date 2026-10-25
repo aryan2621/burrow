@@ -8,8 +8,9 @@ import Tools from "./Tools";
 import Settings from "./Settings";
 import Onboarding from "./Onboarding";
 import { PermissionsTab } from "./Permissions";
+import Memory from "./Memory";
 
-const TABS = ["chat", "timeline", "schedules", "tools", "permissions"] as const;
+const TABS = ["chat", "timeline", "schedules", "tools", "memory", "permissions"] as const;
 
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -75,6 +76,7 @@ export default function App() {
               {tab === "timeline" && <Timeline agent={agent} />}
               {tab === "schedules" && <Schedules agent={agent} />}
               {tab === "tools" && <Tools agent={agent} />}
+              {tab === "memory" && <Memory key={agent.id} agent={agent} />}
               {tab === "permissions" && <PermissionsTab key={agent.id} agent={agent} onSaved={load} />}
             </div>
           </div>

@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn rules() {
         let mut a = store::Agent { id: 1, name: "a".into(), role_prompt: "".into(), model_ref: "ollama:x".into(),
-            folders: vec![], allowed_domains: vec!["example.com".into()], approval_rules: Default::default(), context_budget: 8_000 };
+            folders: vec![], allowed_domains: vec!["example.com".into()], approval_rules: Default::default(), context_budget: 8_000, limits: Default::default() };
         assert_eq!(rule(&a, "write_file", &json!({}), false), Rule::Allow);
         assert_eq!(rule(&a, "shell", &json!({}), false), Rule::Ask);
         assert_eq!(rule(&a, "http_fetch", &json!({"url": "https://docs.example.com"}), false), Rule::Allow);

@@ -242,7 +242,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let st = Arc::new(State::new(tmp.path().to_path_buf(), String::new(), String::new(), Sandbox::detect(), Vault::File(tmp.path().join("keys"))).await.unwrap());
         let a = store::Agent { id: 0, name: "t".into(), role_prompt: "".into(), model_ref: "ollama:x".into(), folders: vec![],
-            allowed_domains: vec!["localhost".into()], approval_rules: Default::default(), context_budget: 8_000 };
+            allowed_domains: vec!["localhost".into()], approval_rules: Default::default(), context_budget: 8_000, limits: Default::default() };
         let id = store::create_agent(&st.db, &a).await.unwrap();
         // an "upstream" on loopback, reachable only because `localhost` is allowlisted verbatim
         let up = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -301,7 +301,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let st = Arc::new(State::new(tmp.path().to_path_buf(), String::new(), String::new(), Sandbox::detect(), Vault::File(tmp.path().join("keys"))).await.unwrap());
         let mk = |domains: &[&str]| store::Agent { id: 0, name: "n".into(), role_prompt: "".into(), model_ref: "ollama:x".into(),
-            folders: vec![], allowed_domains: domains.iter().map(|d| d.to_string()).collect(), approval_rules: Default::default(), context_budget: 8_000 };
+            folders: vec![], allowed_domains: domains.iter().map(|d| d.to_string()).collect(), approval_rules: Default::default(), context_budget: 8_000, limits: Default::default() };
         let mut open = mk(&policy::PACKAGE_REGISTRIES);
         open.allowed_domains.push("example.com".into());
         let mut shut = mk(&[]);

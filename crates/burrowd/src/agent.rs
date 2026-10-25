@@ -16,10 +16,6 @@ use std::time::Duration;
 use tokio::sync::{broadcast, oneshot};
 use tokio::task::AbortHandle;
 
-const MAX_STEPS: usize = 10;
-/// Runaway limits per run, checked before each model call (a pending approval doesn't get cut off).
-const MAX_RUN_SECS: u64 = 30 * 60;
-const MAX_RUN_OUTPUT_TOKENS: i64 = 32_000;
 /// Tools whose output is outside content; after one runs, side effects need approval.
 fn brings_untrusted(tool: &str) -> bool {
     matches!(tool, "http_fetch" | "web_search") || tool.starts_with("mcp__")
@@ -47,6 +43,8 @@ pub struct State {
     pub vault: Vault,
     pub ollama_q: Queue,
     pub llama_q: Queue,
+    /// Cloud providers rate-limit per key, not per slot; this only bounds concurrent requests.
+    pub cloud_q: Queue,
 }
 
 impl State {
@@ -63,7 +61,7 @@ impl State {
         Ok(State {
             db, http: reqwest::Client::new(), events: broadcast::channel(1024).0, ollama_url, llama, downloads: Default::default(),
             home, sandbox, running: Default::default(), queued_fire: Default::default(), shutdown: Default::default(), handover: Default::default(), pending: Default::default(), vault,
-            ollama_q: Queue::new(slots("OLLAMA_NUM_PARALLEL", 1)), llama_q: Queue::new(llama_slots),
+            ollama_q: Queue::new(slots("OLLAMA_NUM_PARALLEL", 1)), llama_q: Queue::new(llama_slots), cloud_q: Queue::new(8),
         })
     }
 
@@ -146,14 +144,50 @@ async fn exec_tool(st: &Arc<State>, agent: &store::Agent, folders: &[PathBuf], s
 async fn call_model(st: &State, agent_id: i64, run_id: i64, prio: Priority, model_ref: &str, msgs: &[Value],
                     tools: &Value, on_delta: impl FnMut(&str)) -> Result<Value> {
     let (backend, model) = models::parse_ref(model_ref)?;
-    let (base, q) = if backend == "ollama" { (&st.ollama_url, &st.ollama_q) } else { (&st.llama.url, &st.llama_q) };
-    // held through the call: a model switch waits for it instead of killing the stream
-    let _model = if backend == "llama" { st.llama.use_model(&st.http, model).await? } else { None };
-    let _slot = q.acquire(prio).await;
-    let t0 = std::time::Instant::now();
-    let (reply, usage) = models::chat(&st.http, base, model, msgs, tools, on_delta).await?;
-    store::add_model_call(&st.db, agent_id, run_id, model_ref, &usage, t0.elapsed().as_millis() as i64).await?;
+    let (reply, usage, ms) = if models::is_cloud(model_ref) {
+        let (base, key) = models::provider(&st.db, &st.vault, backend).await?
+            .with_context(|| format!("no {backend} API key (Settings → Cloud models)"))?;
+        let _slot = st.cloud_q.acquire(prio).await;
+        let t0 = std::time::Instant::now();
+        let (r, u) = if backend == "anthropic" {
+            models::anthropic(&st.http, &key, model, msgs, tools, on_delta).await?
+        } else {
+            models::chat(&st.http, &base, Some(&key), model, msgs, tools, on_delta).await?
+        };
+        (r, u, t0.elapsed())
+    } else {
+        let (base, q) = if backend == "ollama" { (&st.ollama_url, &st.ollama_q) } else { (&st.llama.url, &st.llama_q) };
+        // held through the call: a model switch waits for it instead of killing the stream
+        let _model = if backend == "llama" { st.llama.use_model(&st.http, model).await? } else { None };
+        let _slot = q.acquire(prio).await;
+        let t0 = std::time::Instant::now();
+        let (r, u) = models::chat(&st.http, &format!("{base}/v1"), None, model, msgs, tools, on_delta).await?;
+        (r, u, t0.elapsed())
+    };
+    store::add_model_call(&st.db, agent_id, run_id, model_ref, &usage, ms.as_millis() as i64).await?;
     Ok(reply)
+}
+
+/// Reviewer pass: a second model call checks an auto-allowed side effect against the user's
+/// request. Returns the objection, if any; a failed review objects too.
+async fn review(st: &State, agent: &store::Agent, run_id: i64, prio: Priority, request: &str, said: &str, name: &str, args: &Value) -> Option<String> {
+    let mut action = format!("{name} {args}");
+    if action.len() > 4_000 {
+        action.truncate(action.floor_char_boundary(4_000));
+        action.push_str(" …");
+    }
+    let prompt = format!("You check actions an AI agent is about to take for its user. Reply `yes` if the action \
+        is what the user's request calls for, otherwise `no: <short reason>`. Reply with nothing else.\n\n\
+        User's request:\n{request}\n\nAgent's last message:\n{said}\n\nAction: {action}");
+    let r = call_model(st, agent.id, run_id, prio, &agent.model_ref, &[json!({"role": "user", "content": prompt})], &json!([]), |_| {}).await;
+    let r = match r {
+        Ok(r) => r,
+        Err(e) => return Some(format!("review failed: {e:#}")),
+    };
+    // local reasoning models may inline their thinking
+    let text = r["content"].as_str().unwrap_or("");
+    let text = text.rsplit("</think>").next().unwrap_or("").trim();
+    (!text.to_lowercase().starts_with("yes")).then(|| text.trim_start_matches(|c: char| c.is_alphabetic() || c == ':').trim().to_string())
 }
 
 /// Handle one user message to completion: model → tools → model … until a plain reply.
@@ -180,13 +214,14 @@ pub async fn run(st: Arc<State>, agent_id: i64, text: &str, prio: Priority, trig
     store::add_message(&st.db, agent_id, &json!({"role": "user", "content": text})).await?;
     let t0 = std::time::Instant::now();
     let mut tainted = false;
-    for _ in 0..MAX_STEPS {
-        if t0.elapsed().as_secs() > MAX_RUN_SECS {
-            bail!("stopped after {} minutes", MAX_RUN_SECS / 60);
+    let lim = agent.limits.clone();
+    for _ in 0..lim.max_steps {
+        if t0.elapsed().as_secs() as i64 > lim.max_run_secs {
+            bail!("stopped after {} minutes", lim.max_run_secs / 60);
         }
         let out: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(completion_tokens), 0) FROM model_calls WHERE run_id = ?")
             .bind(run_id).fetch_one(&st.db).await?;
-        if out > MAX_RUN_OUTPUT_TOKENS {
+        if out > lim.max_run_tokens {
             bail!("stopped after {out} output tokens");
         }
         let budget = agent.context_budget.max(1_000) as usize;
@@ -222,14 +257,22 @@ pub async fn run(st: Arc<State>, agent_id: i64, text: &str, prio: Priority, trig
             let base = policy::rule(&agent, &name, &args, mcp.read_only(&name));
             // prompt-injection guard: content from outside may be steering this call
             let guarded = base == Rule::Allow && tainted && side_effect;
-            let rule = if guarded { Rule::Ask } else { base };
+            let why = if guarded {
+                Some("asked because this run read web or MCP content".to_string())
+            } else if base == Rule::Allow && side_effect && agent.limits.review {
+                let said = reply["content"].as_str().unwrap_or("");
+                review(&st, &agent, run_id, prio, text, said, &name, &args).await.map(|o| format!("the reviewer objected: {o}"))
+            } else {
+                None
+            };
+            let rule = if why.is_some() { Rule::Ask } else { base };
             tainted |= brings_untrusted(&name);
             let decision = match rule {
                 Rule::Allow => "auto",
                 Rule::Deny => "denied",
-                Rule::Ask if policy::ask(&st, agent_id, run_id, &name, &match (guarded, &args) {
-                    (true, Value::Object(m)) => json!(m.clone().into_iter()
-                        .chain([("_why".to_string(), json!("asked because this run read web or MCP content"))])
+                Rule::Ask if policy::ask(&st, agent_id, run_id, &name, &match (&why, &args) {
+                    (Some(w), Value::Object(m)) => json!(m.clone().into_iter()
+                        .chain([("_why".to_string(), json!(w))])
                         .collect::<serde_json::Map<_, _>>()),
                     _ => args.clone(),
                 }).await? => "approved",
@@ -257,7 +300,7 @@ pub async fn run(st: Arc<State>, agent_id: i64, text: &str, prio: Priority, trig
             result?;
         }
     }
-    bail!("stopped after {MAX_STEPS} steps")
+    bail!("stopped after {} steps", lim.max_steps)
 }
 
 /// Start a run in the background so it outlives the client that asked for it. When it ends,
@@ -357,7 +400,7 @@ mod tests {
         let st = Arc::new(State::new(tmp.path().to_path_buf(), url, String::new(), Sandbox::detect(), Vault::File(tmp.path().join("keys"))).await.unwrap());
         let a = store::Agent { id: 0, name: "t".into(), role_prompt: "test".into(),
             model_ref: "ollama:stub".into(), folders: vec![work.canonicalize().unwrap()],
-            allowed_domains: vec![], approval_rules: Default::default(), context_budget: 8_000 };
+            allowed_domains: vec![], approval_rules: Default::default(), context_budget: 8_000, limits: store::Limits { review: false, ..Default::default() } };
         let id = store::create_agent(&st.db, &a).await.unwrap();
 
         run(st.clone(), id, "write hello", Priority::Interactive, "chat").await.unwrap();
@@ -387,7 +430,7 @@ mod tests {
             "arguments": json!({"path": "keep.txt"}).to_string()}}]})).await;
         let st = Arc::new(State::new(tmp.path().to_path_buf(), url, String::new(), Sandbox::detect(), Vault::File(tmp.path().join("keys"))).await.unwrap());
         let a = store::Agent { id: 0, name: "t".into(), role_prompt: "".into(), model_ref: "ollama:stub".into(),
-            folders: vec![work.canonicalize().unwrap()], allowed_domains: vec![], approval_rules: Default::default(), context_budget: 8_000 };
+            folders: vec![work.canonicalize().unwrap()], allowed_domains: vec![], approval_rules: Default::default(), context_budget: 8_000, limits: store::Limits { review: false, ..Default::default() } };
         let id = store::create_agent(&st.db, &a).await.unwrap();
 
         let mut ev = st.events.subscribe();
