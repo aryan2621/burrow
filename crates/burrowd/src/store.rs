@@ -99,8 +99,13 @@ pub async fn get_agent(db: &SqlitePool, id: i64) -> Result<Agent> {
 }
 
 pub async fn create_agent(db: &SqlitePool, a: &Agent) -> Result<i64> {
+    // Never reuse a deleted agent's id: the journal and model_calls outlive it (no FK), so a
+    // reused id would inherit its history.
     let id = sqlx::query(
-        "INSERT INTO agents (name, role_prompt, model_ref, folders, allowed_domains, approval_rules, context_budget) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agents (id, name, role_prompt, model_ref, folders, allowed_domains, approval_rules, context_budget)
+         VALUES ((SELECT MAX(m) + 1 FROM (SELECT COALESCE(MAX(id), 0) m FROM agents
+           UNION ALL SELECT COALESCE(MAX(agent_id), 0) FROM actions UNION ALL SELECT COALESCE(MAX(agent_id), 0) FROM model_calls)),
+         ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&a.name)
     .bind(&a.role_prompt)

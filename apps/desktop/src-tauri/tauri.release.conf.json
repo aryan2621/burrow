@@ -1,0 +1,6 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/burrowd"],
+    "resources": { "resources/llama/": "llama/" }
+  }
+}

@@ -13,9 +13,11 @@ use tokio::process::Command;
 use tokio::task::AbortHandle;
 
 const MAX_OUT: usize = 16 * 1024;
-// shortcut: switch to the GHCR build of sandbox-images/base once M6 publishes it (org name pending);
-// until then build it locally and set BURROW_SANDBOX_IMAGE.
-const DEFAULT_IMAGE: &str = "python:3.12-slim";
+// Release builds set BURROW_DEFAULT_IMAGE to the GHCR build of sandbox-images/base.
+const DEFAULT_IMAGE: &str = match option_env!("BURROW_DEFAULT_IMAGE") {
+    Some(i) => i,
+    None => "python:3.12-slim",
+};
 
 /// Docker/Podman internal networks can't reach the host, so a second container on both the
 /// internal and the default network relays port 3128 to the daemon's proxy. Python because

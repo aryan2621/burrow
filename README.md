@@ -1,6 +1,6 @@
 # Burrow
 
-Your private AI team, running on your machine. Spec: `../product-specs/burrow.md`. Phases 1–2 are done: skeleton and safety core.
+Your private AI team, running on your machine. Spec: `../product-specs/burrow.md`. v0.1 is feature-complete; release signing waits on accounts. User docs: `docs/` (mdBook, `mdbook serve docs`). See also `SECURITY.md`, `PRIVACY.md`.
 
 ## Run
 
@@ -13,20 +13,20 @@ cd apps/desktop && pnpm i && pnpm tauri dev
 Sandbox runtime (for the `shell` tool), picked automatically in this order:
 Apple `container` (macOS 26, one VM per agent: `brew install container && container system start`),
 then Podman, then Docker (Linux/Windows). Override with `BURROW_SANDBOX=docker`, image with `BURROW_SANDBOX_IMAGE`.
-The default image is `python:3.12-slim` until the base image is published; for uv and Node build
-`sandbox-images/base` (`container build -t burrow-sandbox-base sandbox-images/base`) and set `BURROW_SANDBOX_IMAGE=burrow-sandbox-base`.
+Release builds default to `ghcr.io/<owner>/burrow-sandbox-base` (`BURROW_DEFAULT_IMAGE` at build time); dev builds use
+`python:3.12-slim`. For uv and Node locally, build `sandbox-images/base` (`container build -t burrow-sandbox-base sandbox-images/base`) and set `BURROW_SANDBOX_IMAGE=burrow-sandbox-base`.
 
 The app starts `burrowd` if it isn't already running. The daemon keeps running after the window closes.
 
 - Data: `~/.burrow/` (override with `BURROW_HOME`): `burrow.db`, `snapshots/` (undo), `scratch/<agent>/`.
 - IPC: Unix socket `~/.burrow/burrowd.sock` (0600) on macOS/Linux, named pipe `\\.\pipe\burrowd-<user>` on Windows.
 - Built-in models (llama.cpp): `scripts/fetch-llama.sh` installs a pinned, checksummed llama-server into `~/.burrow/llama` (the app bundles it). `hardware.detect` recommends a model by RAM from `crates/burrowd/models.json` (Qwen3 4B / 8B / 30B-A3B); `models.download {id}` fetches it into `~/.burrow/models` with resume and a sha256 check. Use `llama:<id>` model refs: the daemon starts llama-server on a free loopback port (`--parallel 4`, prompt cache reused per slot) and restarts it when an agent needs another model. `BURROW_LLAMA_URL` points at your own server instead.
-- Test: `cargo test -p burrowd`; with a sandbox runtime installed also `cargo test -p burrowd -- --ignored sandbox` (`sandbox_mcp_stdio` needs the base image).
+- CI/release: `.github/workflows/ci.yml` (3-OS daemon + desktop build), `release.yml` (on `v*` tag: sidecar `burrowd`, bundled llama.cpp, tauri-action draft release; signing secrets optional), `image.yml` (multi-arch sandbox image to GHCR).
 
 ## Daemon API (ND-JSON-RPC 2.0 over the socket)
 
-`status`, `hardware.detect`, `models.list`, `models.pull {name}` (Ollama), `models.catalog`, `models.download {id}`, `models.cancel {id}`, `agents.list`, `agents.create {name, role_prompt, model_ref, folders, allowed_domains?, approval_rules?}`, `agents.update {agent_id, allowed_domains, approval_rules}`, `agents.kill {agent_id}`, `agents.delete {agent_id}`, `chat.history {agent_id}`, `chat.send {agent_id, text}`, `chat.busy`, `actions.list {agent_id}`, `actions.undo {action_id, force?}`, `runs.undo {run_id, force?}`, `journal.verify`, `model_calls.list {agent_id}`, `secrets.set {name, value?, hosts, agent_ids, header?}`, `secrets.list`, `secrets.delete {name}`, `search.configure {brave_key?, searxng_url?}` (null clears), `domains.presets`, `mcp.list {agent_id}`, `mcp.add {agent_id, name, transport: stdio|http, command?|url?, secrets?}`, `mcp.remove {agent_id, name}`, `approvals.pending`, `approvals.decide {approval_id, allow, remember?}`, `events.subscribe`.
-After `events.subscribe` a connection receives `chat.delta`, `chat.tool`, `chat.done`, `approval.requested`, `models.progress`, `models.downloaded` and `models.download_failed`.
+`status`, `hardware.detect`, `models.list`, `models.pull {name}` (Ollama), `models.catalog`, `models.download {id}`, `models.cancel {id}`, `agents.list`, `agents.create {name, role_prompt, model_ref, folders, allowed_domains?, approval_rules?}`, `agents.update {agent_id, allowed_domains, approval_rules}`, `agents.kill {agent_id}`, `agents.delete {agent_id}`, `chat.history {agent_id}`, `chat.send {agent_id, text}`, `chat.busy`, `actions.list {agent_id}`, `actions.undo {action_id, force?}`, `runs.undo {run_id, force?}`, `journal.verify`, `model_calls.list {agent_id}`, `secrets.set {name, value?, hosts, agent_ids, header?}`, `secrets.list`, `secrets.delete {name}`, `search.configure {brave_key?, searxng_url?}` (null clears), `domains.presets`, `mcp.list {agent_id}`, `mcp.add {agent_id, name, transport: stdio|http, command?|url?, secrets?}`, `mcp.remove {agent_id, name}`, `approvals.pending`, `approvals.decide {approval_id, allow, remember?}`, `settings.get {key}`, `settings.set {key, value}`, `service.install`, `service.uninstall`, `runs.list {agent_id}`, `schedules.list {agent_id}`, `schedules.add {agent_id, kind: cron|interval|file, spec, prompt}`, `schedules.update {id, enabled?, spec?, prompt?}`, `schedules.delete {id}`, `events.subscribe`.
+After `events.subscribe` a connection receives `chat.delta`, `chat.tool`, `chat.done`, `approval.requested`, `models.progress`, `models.downloaded`, `models.download_failed`, `schedule.fired` and `schedule.skipped`.
 
 ## Safety model
 
@@ -39,4 +39,4 @@ After `events.subscribe` a connection receives `chat.delta`, `chat.tool`, `chat.
 - **Approvals:** default allow for list/read/write (undoable), ask for delete, shell and new domains. "Always allow" saves a rule or adds the domain.
 - **Kill switch:** stops the run, denies its pending approvals, removes its sandbox.
 
-Not yet: owner-only DACL on the Windows pipe, rootless Podman networking on Linux, secret injection into sandbox traffic (needs TLS interception, v0.2).
+Not yet: rootless Podman networking on Linux, secret injection into sandbox traffic (needs TLS interception, v0.2).

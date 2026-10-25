@@ -36,6 +36,7 @@ pub fn find_server(home: &Path) -> Option<PathBuf> {
     if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
         dirs.push(d.join("llama"));
         dirs.push(d.join("../Resources/llama"));
+        dirs.push(d.join("../lib/Burrow/llama"));
     }
     dirs.extend(std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default());
     dirs.into_iter().map(|d| d.join(exe)).find(|p| p.is_file())

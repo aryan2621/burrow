@@ -1,3 +1,6 @@
 target/
 node_modules/
 dist/
+apps/desktop/src-tauri/binaries/
+apps/desktop/src-tauri/resources/
+__pycache__/

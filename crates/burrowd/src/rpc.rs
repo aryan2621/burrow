@@ -35,18 +35,31 @@ pub async fn serve(home: &Path, st: Arc<State>) -> Result<()> {
     }
 }
 
-// shortcut: default pipe DACL lets other local users open it read-only; events need a
-// subscribe request (write access), so they see nothing. Set an owner-only DACL before Windows release.
 #[cfg(windows)]
 pub async fn serve(home: &Path, st: Arc<State>) -> Result<()> {
-    use tokio::net::windows::named_pipe::ServerOptions;
+    use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+    use windows_sys::Win32::{
+        Security::{Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW, SECURITY_ATTRIBUTES},
+    };
+    // Owner-only DACL: other local users can't open the pipe at all. The descriptor lives
+    // as long as the server loop (the whole process), so it's never freed.
+    let sddl: Vec<u16> = "D:P(A;;GA;;;OW)".encode_utf16().chain([0]).collect();
+    let mut sd = std::ptr::null_mut();
+    if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), 1, &mut sd, std::ptr::null_mut()) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("pipe security descriptor");
+    }
+    let mut sa = SECURITY_ATTRIBUTES { nLength: size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: sd, bInheritHandle: 0 };
     let name = endpoint(home);
-    let mut server = ServerOptions::new().first_pipe_instance(true).reject_remote_clients(true).create(&name)
-        .context("burrowd is already running")?;
+    let mut create = |first: bool| -> std::io::Result<NamedPipeServer> {
+        let mut o = ServerOptions::new();
+        o.first_pipe_instance(first).reject_remote_clients(true);
+        unsafe { o.create_with_security_attributes_raw(&name, &mut sa as *mut _ as *mut _) }
+    };
+    let mut server = create(true).context("burrowd is already running")?;
     eprintln!("burrowd listening on {}", name.display());
     loop {
         server.connect().await?;
-        let client = std::mem::replace(&mut server, ServerOptions::new().reject_remote_clients(true).create(&name)?);
+        let client = std::mem::replace(&mut server, create(false)?);
         tokio::spawn(handle(client, st.clone()));
     }
 }
@@ -204,6 +217,7 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
         "agents.delete" => {
             agent::kill(st, id()?).await?;
             store::delete_agent(&st.db, id()?).await?;
+            let _ = std::fs::remove_dir_all(st.home.join("scratch").join(id()?.to_string()));
             json!(true)
         }
         "agents.kill" => {

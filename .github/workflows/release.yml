@@ -1,0 +1,74 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sandbox image name
+        shell: bash
+        # compiled into burrowd via option_env!; GHCR names must be lowercase
+        run: echo "BURROW_DEFAULT_IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/burrow-sandbox-base:${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: apps/desktop/pnpm-lock.yaml
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev
+      - name: Build burrowd sidecar
+        shell: bash
+        run: |
+          cargo build --release -p burrowd --target ${{ matrix.target }}
+          ext=""; [ "${{ runner.os }}" = Windows ] && ext=.exe
+          mkdir -p apps/desktop/src-tauri/binaries
+          cp target/${{ matrix.target }}/release/burrowd$ext apps/desktop/src-tauri/binaries/burrowd-${{ matrix.target }}$ext
+      - name: Bundle llama.cpp
+        shell: bash
+        run: scripts/fetch-llama.sh --bundle
+      - run: pnpm install --frozen-lockfile
+        working-directory: apps/desktop
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional until the accounts exist; empty values give unsigned builds.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: apps/desktop
+          args: --target ${{ matrix.target }} --config src-tauri/tauri.release.conf.json
+          tagName: ${{ github.ref_name }}
+          releaseName: Burrow ${{ github.ref_name }}
+          releaseDraft: true

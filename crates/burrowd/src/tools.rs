@@ -118,7 +118,7 @@ fn call(folders: &[PathBuf], snapshots: &Path, name: &str, args: &Value) -> Resu
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

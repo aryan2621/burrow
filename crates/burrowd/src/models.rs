@@ -69,6 +69,8 @@ pub async fn chat(
                                   "cache_prompt": true});
             if tools.as_array().is_some_and(|t| !t.is_empty()) {
                 body["tools"] = tools.clone();
+                // small models batch dependent calls (read then write) and write placeholders
+                body["parallel_tool_calls"] = json!(false);
             }
             body
         })
