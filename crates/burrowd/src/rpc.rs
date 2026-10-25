@@ -251,8 +251,7 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
         "mcp.list" => json!(mcp::list(&st.db, id()?).await?),
         "mcp.add" => {
             store::get_agent(&st.db, id()?).await?;
-            mcp::add(&st.db, p).await?;
-            json!(true)
+            json!({"warnings": mcp::add(&st.db, p).await?})
         }
         "mcp.remove" => {
             mcp::remove(&st.db, id()?, s("name")?).await?;

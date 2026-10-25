@@ -5,6 +5,7 @@ import { Agent, McpServer, rpc, ui } from "./rpc";
 export default function Tools({ agent }: { agent: Agent }) {
   const [list, setList] = useState<McpServer[]>([]);
   const [error, setError] = useState("");
+  const [warnings, setWarnings] = useState<string[]>([]);
   const [f, setF] = useState({ name: "", transport: "stdio" as McpServer["transport"], command: "", url: "", secrets: "" });
 
   const load = () => rpc<McpServer[]>("mcp.list", { agent_id: agent.id }).then(setList, (e) => setError(String(e)));
@@ -13,13 +14,15 @@ export default function Tools({ agent }: { agent: Agent }) {
   const add = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    setWarnings([]);
     try {
-      await rpc("mcp.add", {
+      const r = await rpc<{ warnings: string[] }>("mcp.add", {
         agent_id: agent.id, name: f.name, transport: f.transport,
         // shortcut: arguments split on spaces; quoting isn't supported
         command: f.command.split(/\s+/).filter(Boolean), url: f.url || null,
         secrets: f.secrets.split(",").map((s) => s.trim()).filter(Boolean),
       });
+      setWarnings(r.warnings);
       setF({ ...f, name: "", command: "", url: "", secrets: "" });
       load();
     } catch (e) {
@@ -67,6 +70,12 @@ export default function Tools({ agent }: { agent: Agent }) {
         )}
         {f.transport === "stdio" && <p className="text-xs text-stone-500">npx/uvx install through the sandbox proxy, so allow the package registries in Permissions.</p>}
         {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
+        {warnings.length > 0 && (
+          <div role="status" className="text-sm text-amber-700 dark:text-amber-400">
+            Added, with Antidote warnings:
+            <ul className="list-disc pl-5">{warnings.map((w) => <li key={w}>{w}</li>)}</ul>
+          </div>
+        )}
         <button className={ui.primary}>Add</button>
       </form>
     </div>

@@ -30,7 +30,8 @@ pub async fn list(db: &SqlitePool, agent_id: i64) -> Result<Vec<Value>> {
 }
 
 /// `mcp.add`: {agent_id, name, transport: stdio|http, command: [argv] | url, secrets: [names]}. Replaces a same-named server.
-pub async fn add(db: &SqlitePool, p: &Value) -> Result<()> {
+/// Returns Antidote warnings (medium/low findings) for the UI; critical/high findings refuse the add.
+pub async fn add(db: &SqlitePool, p: &Value) -> Result<Vec<String>> {
     let agent_id = p["agent_id"].as_i64().context("missing `agent_id`")?;
     let name = p["name"].as_str().context("missing `name`")?;
     anyhow::ensure!(valid_name(name), "server names use up to 20 letters, digits, - and _ (no `__`)");
@@ -44,13 +45,55 @@ pub async fn add(db: &SqlitePool, p: &Value) -> Result<()> {
         }
         _ => bail!("`transport` must be stdio or http"),
     }
+    let warnings = match package_ref(&command) {
+        Some(r) => antidote_check(&r).await?,
+        None => vec![],
+    };
     let secrets: Vec<String> = serde_json::from_value(p["secrets"].clone()).unwrap_or_default();
     sqlx::query("INSERT INTO mcp_servers (agent_id, name, transport, command, url, secrets) VALUES (?, ?, ?, ?, ?, ?)
                  ON CONFLICT(agent_id, name) DO UPDATE SET transport = excluded.transport, command = excluded.command,
                  url = excluded.url, secrets = excluded.secrets")
         .bind(agent_id).bind(name).bind(p["transport"].as_str()).bind(json!(command).to_string()).bind(url)
         .bind(json!(secrets).to_string()).execute(db).await?;
-    Ok(())
+    Ok(warnings)
+}
+
+/// `npx -y @x/server@1.2` → `npm:@x/server@1.2`, `uvx mcp-server-git` → `pypi:mcp-server-git`.
+fn package_ref(argv: &[String]) -> Option<String> {
+    let prog = Path::new(argv.first()?).file_stem()?.to_str()?;
+    let (eco, value_flags): (&str, &[&str]) = match prog {
+        "npx" | "bunx" => ("npm", &["-p", "--package"]),
+        "uvx" => ("pypi", &["--from"]),
+        _ => return None,
+    };
+    let mut args = argv[1..].iter();
+    while let Some(a) = args.next() {
+        if value_flags.contains(&a.as_str()) {
+            return Some(format!("{eco}:{}", args.next()?));
+        }
+        if !a.starts_with('-') {
+            return Some(format!("{eco}:{a}"));
+        }
+    }
+    None
+}
+
+/// Look the package up with the `antidote` scanner when it's installed; no scanner means no check.
+async fn antidote_check(pkg: &str) -> Result<Vec<String>> {
+    if !crate::sandbox::on_path("antidote") {
+        return Ok(vec![]);
+    }
+    let run = tokio::process::Command::new("antidote").args(["check", pkg, "--format", "json", "--fail-on", "never"]).output();
+    let findings: Vec<Value> = match tokio::time::timeout(std::time::Duration::from_secs(20), run).await {
+        Ok(Ok(o)) if o.status.success() => serde_json::from_slice(&o.stdout).unwrap_or_default(),
+        _ => return Ok(vec![format!("antidote could not check {pkg}")]),
+    };
+    let line = |f: &Value| format!("{} {}: {}", f["severity"].as_str().unwrap_or("?"), f["id"].as_str().unwrap_or("?"), f["summary"].as_str().unwrap_or(""));
+    let blocking: Vec<String> = findings.iter().filter(|f| matches!(f["severity"].as_str(), Some("critical" | "high"))).map(line).collect();
+    if !blocking.is_empty() {
+        bail!("Antidote flags {pkg}: {}", blocking.join("; "));
+    }
+    Ok(findings.iter().map(line).collect())
 }
 
 pub async fn remove(db: &SqlitePool, agent_id: i64, name: &str) -> Result<()> {

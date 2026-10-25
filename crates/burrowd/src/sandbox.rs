@@ -61,7 +61,7 @@ pub struct Sandbox {
 /// What a networked sandbox needs from the proxy: the port it listens on, its token and its task.
 pub type Proxy = (u16, String, AbortHandle);
 
-fn on_path(bin: &str) -> bool {
+pub fn on_path(bin: &str) -> bool {
     let exe = if cfg!(windows) { format!("{bin}.exe") } else { bin.to_string() };
     std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).any(|d| d.join(&exe).is_file()))
