@@ -1,0 +1,215 @@
+use crate::agent::{self, State};
+use crate::queue::Priority;
+use crate::{journal, models, policy, secrets, service, store};
+use anyhow::{Context, Result};
+use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc;
+
+/// Where clients connect: a Unix socket in `home`, or a per-user named pipe on Windows.
+pub fn endpoint(home: &Path) -> PathBuf {
+    if cfg!(windows) {
+        let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".into());
+        PathBuf::from(format!(r"\\.\pipe\burrowd-{user}"))
+    } else {
+        home.join("burrowd.sock")
+    }
+}
+
+#[cfg(unix)]
+pub async fn serve(home: &Path, st: Arc<State>) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let sock = endpoint(home);
+    if tokio::net::UnixStream::connect(&sock).await.is_ok() {
+        anyhow::bail!("burrowd is already running ({})", sock.display());
+    }
+    let _ = std::fs::remove_file(&sock); // stale socket from a crash
+    let listener = tokio::net::UnixListener::bind(&sock)?;
+    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600))?;
+    eprintln!("burrowd listening on {}", sock.display());
+    loop {
+        let (stream, _) = listener.accept().await?;
+        tokio::spawn(handle(stream, st.clone()));
+    }
+}
+
+// shortcut: default pipe DACL lets other local users open it read-only; events need a
+// subscribe request (write access), so they see nothing. Set an owner-only DACL before Windows release.
+#[cfg(windows)]
+pub async fn serve(home: &Path, st: Arc<State>) -> Result<()> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+    let name = endpoint(home);
+    let mut server = ServerOptions::new().first_pipe_instance(true).reject_remote_clients(true).create(&name)
+        .context("burrowd is already running")?;
+    eprintln!("burrowd listening on {}", name.display());
+    loop {
+        server.connect().await?;
+        let client = std::mem::replace(&mut server, ServerOptions::new().reject_remote_clients(true).create(&name)?);
+        tokio::spawn(handle(client, st.clone()));
+    }
+}
+
+/// Newline-delimited JSON-RPC 2.0. A client gets notifications after `events.subscribe`.
+async fn handle<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, st: Arc<State>) {
+    let (r, mut w) = tokio::io::split(stream);
+    let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
+    let writer = tokio::spawn(async move {
+        while let Some(v) = rx.recv().await {
+            if w.write_all(format!("{v}\n").as_bytes()).await.is_err() {
+                break;
+            }
+        }
+    });
+    let mut forward: Option<tokio::task::JoinHandle<()>> = None;
+    let mut lines = BufReader::new(r).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let resp = match serde_json::from_str::<Value>(&line) {
+            Ok(req) => {
+                let id = req["id"].clone();
+                let method = req["method"].as_str().unwrap_or("");
+                let res = if method == "events.subscribe" {
+                    if forward.is_none() {
+                        let mut events = st.events.subscribe();
+                        let ev_tx = tx.clone();
+                        forward = Some(tokio::spawn(async move {
+                            // a lagging client just misses some deltas; the DB still has the full history
+                            loop {
+                                match events.recv().await {
+                                    Ok(v) => if ev_tx.send(v).is_err() { break },
+                                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                                    Err(_) => break,
+                                }
+                            }
+                        }));
+                    }
+                    Ok(json!(true))
+                } else {
+                    dispatch(&st, method, &req["params"]).await
+                };
+                match res {
+                    Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                    Err(e) => json!({"jsonrpc": "2.0", "id": id,
+                        "error": {"code": -32000, "message": format!("{e:#}")}}),
+                }
+            }
+            Err(e) => json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": e.to_string()}}),
+        };
+        if tx.send(resp).is_err() {
+            break;
+        }
+    }
+    if let Some(f) = forward {
+        f.abort();
+    }
+    drop(tx);
+    let _ = writer.await;
+}
+
+fn domains(v: &Value) -> Result<Vec<String>> {
+    v.as_array().map(|a| a.iter().map(|d| {
+        let d = d.as_str().context("domain must be a string")?.trim().to_lowercase();
+        anyhow::ensure!(!d.is_empty() && !d.contains(['/', ':', ' ']), "bad domain `{d}` (use e.g. example.com)");
+        Ok(d)
+    }).collect()).unwrap_or(Ok(vec![]))
+}
+
+fn budget(v: &Value) -> Result<Option<i64>> {
+    match v {
+        Value::Null => Ok(None),
+        v => {
+            let b = v.as_i64().context("`context_budget` must be an integer")?;
+            anyhow::ensure!((1_000..=1_000_000).contains(&b), "context_budget must be 1000–1000000 tokens");
+            Ok(Some(b))
+        }
+    }
+}
+
+fn rules(v: &Value) -> Result<std::collections::BTreeMap<String, String>> {
+    let r = if v.is_null() { Default::default() } else { serde_json::from_value(v.clone()).context("bad approval_rules")? };
+    policy::validate(&r)?;
+    Ok(r)
+}
+
+async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
+    let s = |k: &str| p[k].as_str().with_context(|| format!("missing string `{k}`"));
+    let int = |k: &str| p[k].as_i64().with_context(|| format!("missing integer `{k}`"));
+    let id = || int("agent_id");
+    Ok(match method {
+        "status" => json!({"sandbox": st.sandbox.bin, "service_installed": service::installed().unwrap_or(false),
+            "keystore": match st.vault { secrets::Vault::Keychain => "keychain", secrets::Vault::File(_) => "file" }}),
+        "models.list" => json!(models::list(&st.http, &st.ollama_url, &st.llama_url).await),
+        "models.pull" => {
+            models::pull(&st.http, &st.ollama_url, s("name")?).await?;
+            json!(true)
+        }
+        "agents.list" => json!(store::agents(&st.db).await?),
+        "agents.create" => {
+            models::parse_ref(s("model_ref")?)?;
+            let folders = p["folders"].as_array().context("missing `folders`")?.iter()
+                .map(|f| {
+                    let f = PathBuf::from(f.as_str().context("folder must be a string")?);
+                    anyhow::ensure!(f.is_absolute() && f.is_dir(), "{} is not an existing absolute directory", f.display());
+                    Ok(f.canonicalize()?)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            anyhow::ensure!(!folders.is_empty(), "give the agent at least one folder");
+            let a = store::Agent { id: 0, name: s("name")?.into(), role_prompt: s("role_prompt")?.into(),
+                model_ref: s("model_ref")?.into(), folders,
+                allowed_domains: domains(&p["allowed_domains"])?, approval_rules: rules(&p["approval_rules"])?,
+                context_budget: budget(&p["context_budget"])?.unwrap_or(8_000) };
+            json!(store::create_agent(&st.db, &a).await?)
+        }
+        "agents.update" => {
+            let mut a = store::get_agent(&st.db, id()?).await?;
+            a.allowed_domains = domains(&p["allowed_domains"])?;
+            a.approval_rules = rules(&p["approval_rules"])?;
+            if let Some(b) = budget(&p["context_budget"])? {
+                a.context_budget = b;
+            }
+            store::update_permissions(&st.db, &a).await?;
+            json!(true)
+        }
+        "agents.delete" => {
+            agent::kill(st, id()?).await?;
+            store::delete_agent(&st.db, id()?).await?;
+            json!(true)
+        }
+        "agents.kill" => {
+            agent::kill(st, id()?).await?;
+            json!(true)
+        }
+        "chat.history" => json!(store::messages(&st.db, id()?).await?),
+        "chat.send" => {
+            store::get_agent(&st.db, id()?).await?;
+            agent::spawn(st.clone(), id()?, s("text")?.into(), Priority::Interactive)?;
+            json!(true)
+        }
+        "chat.busy" => json!(st.busy()),
+        "actions.list" => json!(journal::list(&st.db, id()?).await?),
+        "actions.undo" => {
+            journal::undo(&st.db, &st.snapshots(), int("action_id")?, p["force"].as_bool().unwrap_or(false)).await?;
+            json!(true)
+        }
+        "runs.undo" => json!(journal::undo_run(&st.db, &st.snapshots(), int("run_id")?, p["force"].as_bool().unwrap_or(false)).await?),
+        "journal.verify" => json!(journal::verify(&st.db).await?),
+        "model_calls.list" => json!(store::model_calls(&st.db, id()?).await?),
+        "secrets.set" => {
+            secrets::set(&st.db, &st.vault, p).await?;
+            json!(true)
+        }
+        "secrets.list" => json!(secrets::list(&st.db).await?),
+        "secrets.delete" => {
+            secrets::delete(&st.db, &st.vault, s("name")?).await?;
+            json!(true)
+        }
+        "approvals.pending" => json!(policy::pending(st).await?),
+        "approvals.decide" => {
+            let allow = p["allow"].as_bool().context("missing bool `allow`")?;
+            policy::decide(st, int("approval_id")?, allow, p["remember"].as_bool().unwrap_or(false)).await?;
+            json!(true)
+        }
+        _ => anyhow::bail!("unknown method `{method}`"),
+    })
+}
