@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { Agent, Schedule, pickFolder, rpc, ui } from "./rpc";
 
-const HINT = { cron: "0 9 * * 1-5  (min hour day month weekday)", interval: "3600  (seconds, at least 60)", file: "a folder or file inside the agent's folders" };
+const HINT = { cron: "0 9 * * 1-5  (min hour day month weekday)", interval: "3600  (seconds, at least 60)", file: "a folder or file inside the agent's folders",
+  email: "email connection name (new mail in INBOX)", calendar: "calendar connection name (events starting in 15 min)",
+  github: "github connection name, then owner/repo (new issues)" };
 
 /** Cron, interval and file-change schedules; runs happen in the background, even with the window closed. */
 export default function Schedules({ agent }: { agent: Agent }) {
@@ -21,7 +23,7 @@ export default function Schedules({ agent }: { agent: Agent }) {
     call("schedules.add", { agent_id: agent.id, ...f }).then(() => setF({ ...f, spec: "", prompt: "" }), () => {});
   };
   const when = (s: Schedule) =>
-    s.kind === "file" ? "on change" : s.next_run_at ? `next ${new Date(s.next_run_at * 1000).toLocaleString()}` : "";
+    s.kind === "file" ? "on change" : ["email", "calendar", "github"].includes(s.kind) ? "checks every minute" : s.next_run_at ? `next ${new Date(s.next_run_at * 1000).toLocaleString()}` : "";
 
   return (
     <div className="h-full max-w-2xl space-y-4 overflow-y-auto p-4">
@@ -51,6 +53,9 @@ export default function Schedules({ agent }: { agent: Agent }) {
             <option value="cron">Cron</option>
             <option value="interval">Every N seconds</option>
             <option value="file">When files change</option>
+            <option value="email">New email</option>
+            <option value="calendar">Event soon</option>
+            <option value="github">New GitHub issue</option>
           </select>
           <input aria-label="When" className={ui.input} required placeholder={HINT[f.kind]} value={f.spec} onChange={(e) => setF({ ...f, spec: e.target.value })} />
           {f.kind === "file" && (

@@ -110,13 +110,20 @@ pub struct Session {
     pub specs: Vec<Value>,
     /// Servers that failed to connect, for the system prompt.
     pub errors: Vec<String>,
+    /// Image results (browser screenshots) are saved here, under `screenshots/`.
+    scratch: std::path::PathBuf,
 }
+
+/// The one-click browser: Playwright's MCP server baked into the sandbox image, its Chromium
+/// sent through the agent's egress proxy.
+pub const BROWSER: &[&str] = &["sh", "-c",
+    "exec playwright-mcp --headless --isolated --no-sandbox --browser chromium --proxy-server \"$HTTPS_PROXY\""];
 
 impl Session {
     /// Connect to every server; one that fails is reported in `errors` and skipped.
     // shortcut: reconnects (and re-runs npx/uvx) every run; keep sessions alive per agent if startup latency hurts.
     pub async fn connect(st: &Arc<State>, agent: &store::Agent, scratch: &Path, bound: &[secrets::Bound]) -> Session {
-        let mut s = Session::default();
+        let mut s = Session { scratch: scratch.to_path_buf(), ..Default::default() };
         let servers = match list(&st.db, agent.id).await {
             Ok(v) => v,
             Err(e) => { s.errors.push(format!("{e:#}")); return s; }
@@ -164,6 +171,10 @@ impl Session {
         self.clients.insert(server, c);
     }
 
+    pub fn has(&self, server: &str) -> bool {
+        self.clients.contains_key(server)
+    }
+
     pub fn read_only(&self, full: &str) -> bool {
         self.tools.get(full).is_some_and(|t| t.2)
     }
@@ -177,12 +188,27 @@ impl Session {
         }
         let res = self.clients[server].call_tool(params).await?;
         let content = serde_json::to_value(&res.content)?;
-        let text: Vec<String> = content.as_array().into_iter().flatten().map(|b| match b["text"].as_str() {
-            Some(t) => t.to_string(),
-            None => format!("[{} content]", b["type"].as_str().unwrap_or("other")),
+        let text: Vec<String> = content.as_array().into_iter().flatten().map(|b| match (b["text"].as_str(), b["data"].as_str()) {
+            (Some(t), _) => t.to_string(),
+            // shortcut: the model gets the path, not the pixels; pass images to vision models once we track which can see
+            (None, Some(data)) if b["type"] == "image" => self.save_image(data, b["mimeType"].as_str().unwrap_or(""))
+                .map(|p| format!("[screenshot: {}]", p.display())).unwrap_or_else(|e| format!("[image not saved: {e:#}]")),
+            _ => format!("[{} content]", b["type"].as_str().unwrap_or("other")),
         }).collect();
         let err = if res.is_error == Some(true) { "error: " } else { "" };
         Ok(format!("<untrusted source=\"mcp:{server}\">\n{err}{}\n</untrusted>", text.join("\n")))
+    }
+}
+
+impl Session {
+    fn save_image(&self, b64: &str, mime: &str) -> Result<std::path::PathBuf> {
+        use base64::Engine;
+        let ext = if mime.contains("jpeg") { "jpg" } else { "png" };
+        let dir = self.scratch.join("screenshots");
+        std::fs::create_dir_all(&dir)?;
+        let p = dir.join(format!("{}.{ext}", chrono::Utc::now().format("%Y%m%d-%H%M%S%.3f")));
+        std::fs::write(&p, base64::engine::general_purpose::STANDARD.decode(b64)?)?;
+        Ok(p)
     }
 }
 

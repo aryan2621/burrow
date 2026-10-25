@@ -3,6 +3,13 @@ import { Action, Agent, ModelCall, Run, onEvent, rpc, sqlTime } from "./rpc";
 
 type Item = { at: number; call?: ModelCall; action?: Action };
 
+/** A browser screenshot the daemon saved in the agent's scratch folder. */
+function Shot({ agentId, path }: { agentId: number; path: string }) {
+  const [src, setSrc] = useState("");
+  useEffect(() => void rpc<string>("files.image", { agent_id: agentId, path }).then(setSrc, () => {}), [path]);
+  return src ? <img src={src} alt="Browser screenshot" className="mt-1 max-h-64 rounded border border-stone-200 dark:border-stone-700" /> : null;
+}
+
 const triggerLabel = (t: string) => (t === "chat" ? "chat" : t.startsWith("schedule:") ? `schedule #${t.slice(9)}` : t);
 
 /** Every run with its model calls and actions in time order, plus undo. The journal is append-only. */
@@ -76,6 +83,7 @@ export default function Timeline({ agent }: { agent: Agent }) {
                       <span className="text-stone-500">{String(a.input.path ?? a.input.url ?? a.input.command ?? a.input.host ?? a.input.query ?? "")}</span>
                       {a.decision !== "auto" && <span className="ml-2 text-xs text-stone-500">({a.decision})</span>}
                       <pre className="truncate text-xs text-stone-500">{a.output}</pre>
+                      {[...a.output.matchAll(/\[screenshot: ([^\]]+)\]/g)].map((m) => <Shot key={m[1]} agentId={agent.id} path={m[1]} />)}
                     </div>
                     {a.undone_at ? (
                       <span className="shrink-0 text-xs text-stone-500">undone</span>

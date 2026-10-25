@@ -37,6 +37,12 @@ export default function Tools({ agent }: { agent: Agent }) {
         MCP tools appear to the agent as <span className="font-mono">mcp__server__tool</span>. They ask before running unless the
         server marks them read-only. Changes apply from the next message.
       </p>
+      {!list.some((s) => s.name === "browser") && (
+        <div className="flex items-center justify-between gap-2 rounded border border-stone-200 p-2 text-sm dark:border-stone-700">
+          <span>Web browser: headless Chromium in this agent's sandbox, limited to its allowed domains. It asks you to handle logins.</span>
+          <button className={ui.button} onClick={() => rpc("mcp.add_browser", { agent_id: agent.id }).then(load, (e) => setError(String(e)))}>Add browser</button>
+        </div>
+      )}
       {list.length === 0 && <p className="text-sm text-stone-500">No MCP servers yet.</p>}
       <ul className="space-y-2">
         {list.map((s) => (

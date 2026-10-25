@@ -9,6 +9,10 @@ use tokio::sync::oneshot;
 pub const TOOLS: [&str; 9] = ["list_dir", "read_file", "write_file", "delete_file", "shell", "http_fetch",
     "notes_add", "notes_search", "web_search"];
 
+fn known(tool: &str) -> bool {
+    TOOLS.contains(&tool) || crate::connectors::TOOLS.contains(&tool) || tool.starts_with("mcp__")
+}
+
 /// One click in the UI adds these, so pip, npm and git work in the sandbox.
 pub const PACKAGE_REGISTRIES: [&str; 6] = ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org",
     "github.com", "codeload.github.com", "objects.githubusercontent.com"];
@@ -20,18 +24,20 @@ pub enum Rule {
     Deny,
 }
 
-/// Writes are undoable, so they run without asking; deletes, shell, new domains and MCP tools ask.
+/// Reads and undoable writes run without asking; deletes, shell, new domains, MCP tools and
+/// anything other people see (email, comments, closing issues) ask.
 pub fn default_rule(tool: &str) -> &'static str {
     match tool {
-        "list_dir" | "read_file" | "write_file" | "notes_add" | "notes_search" | "web_search" => "allow",
+        "list_dir" | "read_file" | "write_file" | "notes_add" | "notes_search" | "web_search"
+        | "email_search" | "email_read" | "email_move" | "calendar_list" | "calendar_create" | "calendar_update"
+        | "github_issues" | "github_label" => "allow",
         _ => "ask",
     }
 }
 
 pub fn validate(rules: &std::collections::BTreeMap<String, String>) -> Result<()> {
     for (tool, r) in rules {
-        let known = TOOLS.contains(&tool.as_str()) || tool.starts_with("mcp__");
-        if !known || !matches!(r.as_str(), "allow" | "ask" | "deny") {
+        if !known(tool) || !matches!(r.as_str(), "allow" | "ask" | "deny") {
             bail!("bad approval rule {tool}={r}");
         }
     }

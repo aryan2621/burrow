@@ -1,6 +1,6 @@
 use crate::agent::{self, State};
 use crate::queue::Priority;
-use crate::{backup, download, notes, hardware, journal, mcp, models, policy, schedule, search, secrets, service, store};
+use crate::{backup, connectors, download, notes, hardware, journal, mcp, models, policy, schedule, search, secrets, service, store};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -196,6 +196,15 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
             notes::delete(&st.db, int("note_id")?).await?;
             json!(true)
         }
+        "connections.list" => json!(connectors::list(&st.db).await?),
+        "connections.set" => {
+            connectors::set(&st.db, &st.vault, p).await?;
+            json!(true)
+        }
+        "connections.delete" => {
+            connectors::delete(&st.db, &st.vault, s("name")?).await?;
+            json!(true)
+        }
         "backup.export" => {
             backup::export(st, Path::new(s("path")?), s("passphrase")?).await?;
             json!(true)
@@ -282,10 +291,10 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
         "chat.busy" => json!(st.busy()),
         "actions.list" => json!(journal::list(&st.db, id()?).await?),
         "actions.undo" => {
-            journal::undo(&st.db, &st.snapshots(), int("action_id")?, p["force"].as_bool().unwrap_or(false)).await?;
+            journal::undo(&st.db, &st.snapshots(), Some(st), int("action_id")?, p["force"].as_bool().unwrap_or(false)).await?;
             json!(true)
         }
-        "runs.undo" => json!(journal::undo_run(&st.db, &st.snapshots(), int("run_id")?, p["force"].as_bool().unwrap_or(false)).await?),
+        "runs.undo" => json!(journal::undo_run(&st.db, &st.snapshots(), Some(st), int("run_id")?, p["force"].as_bool().unwrap_or(false)).await?),
         "journal.verify" => json!(journal::verify(&st.db).await?),
         "model_calls.list" => json!(store::model_calls(&st.db, id()?).await?),
         "secrets.set" => {
@@ -301,6 +310,19 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
         "mcp.add" => {
             store::get_agent(&st.db, id()?).await?;
             json!({"warnings": mcp::add(&st.db, p).await?})
+        }
+        "mcp.add_browser" => {
+            store::get_agent(&st.db, id()?).await?;
+            mcp::add(&st.db, &json!({"agent_id": id()?, "name": "browser", "transport": "stdio", "command": mcp::BROWSER})).await?;
+            json!(true)
+        }
+        "files.image" => {
+            // only the agent's scratch folder, where screenshots land
+            let p = Path::new(s("path")?).canonicalize()?;
+            anyhow::ensure!(p.starts_with(st.scratch(id()?)?) && matches!(p.extension().and_then(|e| e.to_str()), Some("png" | "jpg")), "not a screenshot");
+            use base64::Engine;
+            let mime = if p.extension().is_some_and(|e| e == "jpg") { "image/jpeg" } else { "image/png" };
+            json!(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(std::fs::read(&p)?)))
         }
         "mcp.remove" => {
             mcp::remove(&st.db, id()?, s("name")?).await?;

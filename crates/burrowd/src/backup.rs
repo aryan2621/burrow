@@ -95,6 +95,8 @@ pub async fn import(st: &Arc<State>, path: &Path, pass: &str) -> Result<()> {
 pub async fn wipe(st: &Arc<State>) -> Result<()> {
     let mut keys: Vec<String> = sqlx::query_scalar("SELECT name FROM secrets").fetch_all(&st.db).await?
         .into_iter().map(|n: String| format!("secret-{n}")).collect();
+    let conns: Vec<String> = sqlx::query_scalar("SELECT name FROM connections").fetch_all(&st.db).await?;
+    keys.extend(conns.into_iter().map(|n| format!("conn-{n}")));
     keys.extend(["db-key", "search-brave", "provider-anthropic", "provider-openai"].map(String::from));
     quiesce(st).await?;
     remove_db(&st.home);

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Agent, CatalogModel, Hardware, Providers, Secret, Status, pickFile, pickSavePath, rpc, ui } from "./rpc";
+import { Agent, CatalogModel, Connection, Hardware, Providers, Secret, Status, pickFile, pickSavePath, rpc, ui } from "./rpc";
 import useDownloads from "./useDownloads";
 
 const gb = (b: number) => `${(b / 2 ** 30).toFixed(1)} GB`;
@@ -128,6 +128,82 @@ function Data() {
   );
 }
 
+const FIELDS: Record<Connection["kind"], [string, string][]> = {
+  email: [["imap_host", "IMAP host, e.g. imap.fastmail.com"], ["imap_port", "IMAP port (993)"], ["smtp_host", "SMTP host, e.g. smtp.fastmail.com"],
+    ["smtp_port", "SMTP port (465, or 587 for STARTTLS)"], ["username", "username"], ["address", "from address (if not the username)"]],
+  calendar: [["url", "calendar collection URL (https://…/calendars/…/)"], ["username", "username"]],
+  github: [["repos", "repos agents may touch, comma-separated (empty = any the token allows)"]],
+};
+
+function Connections() {
+  const [list, setList] = useState<Connection[]>([]);
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [error, setError] = useState("");
+  const blank = { name: "", kind: "email" as Connection["kind"], config: {} as Record<string, string>, secret: "", agent_ids: [] as number[] };
+  const [f, setF] = useState(blank);
+  const load = () => rpc<Connection[]>("connections.list").then(setList, (e) => setError(String(e)));
+  useEffect(() => { load(); rpc<Agent[]>("agents.list").then(setAgents); }, []);
+  const save = (e: React.FormEvent) => {
+    e.preventDefault();
+    setError("");
+    const config: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(f.config)) {
+      if (!v) continue;
+      config[k] = k.endsWith("_port") ? Number(v) : k === "repos" ? v.split(",").map((r) => r.trim()).filter(Boolean) : v;
+    }
+    rpc("connections.set", { ...f, config, secret: f.secret || null }).then(() => { setF(blank); load(); }, (e) => setError(String(e)));
+  };
+  const edit = (c: Connection) => setF({ name: c.name, kind: c.kind, secret: "", agent_ids: c.agent_ids,
+    config: Object.fromEntries(Object.entries(c.config).map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : String(v)])) });
+  const name = (id: number) => agents.find((a) => a.id === id)?.name ?? `#${id}`;
+  return (
+    <div className="space-y-2 text-sm">
+      <p className="text-stone-500">Use an app password (email, calendar) or a fine-grained token (GitHub); it goes to the OS keychain. Agents get the
+        connections you tick, and their changes can be undone from the timeline. Emails wait 60 s before sending.</p>
+      <ul className="space-y-1">
+        {list.map((c) => (
+          <li key={c.name} className="flex justify-between gap-2">
+            <span><span className="font-mono">{c.name}</span> ({c.kind}) · {c.agent_ids.map(name).join(", ") || "no agents"}</span>
+            <span className="flex gap-2">
+              <button className={ui.button} onClick={() => edit(c)}>Edit</button>
+              <button className={ui.button} onClick={() => confirm(`Delete connection ${c.name}?`) && rpc("connections.delete", { name: c.name }).then(load)}>Delete</button>
+            </span>
+          </li>
+        ))}
+      </ul>
+      <form onSubmit={save} className="space-y-2">
+        <div className="flex gap-2">
+          <input aria-label="Connection name" className={ui.input} required placeholder="name, e.g. work-mail" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} />
+          <select aria-label="Connection kind" className={`${ui.input} w-36`} value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value as Connection["kind"], config: {} })}>
+            <option value="email">Email</option>
+            <option value="calendar">Calendar</option>
+            <option value="github">GitHub</option>
+          </select>
+        </div>
+        {FIELDS[f.kind].map(([k, label]) => (
+          <input key={k} aria-label={label} className={ui.input} placeholder={label} value={f.config[k] ?? ""}
+            onChange={(e) => setF({ ...f, config: { ...f.config, [k]: e.target.value } })} />
+        ))}
+        <input aria-label="Password or token" type="password" className={ui.input} value={f.secret}
+          placeholder={list.some((c) => c.name === f.name) ? "password or token (leave empty to keep)" : f.kind === "github" ? "token" : "app password"}
+          onChange={(e) => setF({ ...f, secret: e.target.value })} />
+        <fieldset className="flex flex-wrap gap-3">
+          <legend className="sr-only">Agents that may use it</legend>
+          {agents.map((a) => (
+            <label key={a.id} className="flex items-center gap-1">
+              <input type="checkbox" checked={f.agent_ids.includes(a.id)}
+                onChange={(e) => setF({ ...f, agent_ids: e.target.checked ? [...f.agent_ids, a.id] : f.agent_ids.filter((i) => i !== a.id) })} />
+              {a.name}
+            </label>
+          ))}
+        </fieldset>
+        {error && <p role="alert" className="text-red-600">{error}</p>}
+        <button className={ui.primary}>Save connection</button>
+      </form>
+    </div>
+  );
+}
+
 function Secrets() {
   const [list, setList] = useState<Secret[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -211,6 +287,7 @@ export default function Settings() {
         <>
           <section className={section}><h3 className="font-semibold">Web search</h3><Search status={status} reload={reload} /></section>
           <section className={section}><h3 className="font-semibold">Cloud models</h3><Cloud /></section>
+          <section className={section}><h3 className="font-semibold">Connections</h3><Connections /></section>
           <section className={section}><h3 className="font-semibold">Secrets</h3><Secrets /></section>
           <section className={section}><h3 className="font-semibold">Backup and data</h3><Data /></section>
           <section className={section}>

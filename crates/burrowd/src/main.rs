@@ -2,6 +2,7 @@ mod agent;
 mod awake;
 mod backup;
 mod compact;
+mod connectors;
 mod download;
 mod fetch;
 mod hardware;
@@ -76,6 +77,7 @@ async fn main() -> Result<()> {
 
     tokio::spawn(schedule::run(st.clone()));
     tokio::spawn(awake::run(st.clone()));
+    tokio::spawn(connectors::outbox(st.clone()));
     let idle = st.clone();
     tokio::spawn(async move {
         loop {

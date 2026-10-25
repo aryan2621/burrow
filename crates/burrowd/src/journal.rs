@@ -152,7 +152,8 @@ fn current_hash(path: &Path) -> Result<Option<String>> {
     }
 }
 
-pub async fn undo(db: &SqlitePool, snapshots: &Path, action_id: i64, force: bool) -> Result<()> {
+/// `remote` is needed to undo connector actions (email, calendar, GitHub).
+pub async fn undo(db: &SqlitePool, snapshots: &Path, remote: Option<&crate::agent::State>, action_id: i64, force: bool) -> Result<()> {
     let r = sqlx::query("SELECT a.inverse, u.action_id AS undone FROM actions a LEFT JOIN undos u ON u.action_id = a.id WHERE a.id = ?")
         .bind(action_id)
         .fetch_optional(db)
@@ -162,6 +163,11 @@ pub async fn undo(db: &SqlitePool, snapshots: &Path, action_id: i64, force: bool
         bail!("action {action_id} is already undone");
     }
     let inv: Value = serde_json::from_str(&r.get::<Option<String>, _>("inverse").context("this action can't be undone")?)?;
+    if inv.get("connector").is_some() {
+        crate::connectors::undo(remote.context("connector actions need the daemon to undo")?, &inv).await?;
+        sqlx::query("INSERT INTO undos (action_id) VALUES (?)").bind(action_id).execute(db).await?;
+        return Ok(());
+    }
     if let Some(note) = inv["note_id"].as_i64() {
         crate::notes::delete(db, note).await?;
         sqlx::query("INSERT INTO undos (action_id) VALUES (?)").bind(action_id).execute(db).await?;
@@ -187,7 +193,7 @@ pub async fn undo(db: &SqlitePool, snapshots: &Path, action_id: i64, force: bool
 }
 
 /// Undo a run's undoable actions newest first. Stops at the first failure.
-pub async fn undo_run(db: &SqlitePool, snapshots: &Path, run_id: i64, force: bool) -> Result<usize> {
+pub async fn undo_run(db: &SqlitePool, snapshots: &Path, remote: Option<&crate::agent::State>, run_id: i64, force: bool) -> Result<usize> {
     let ids: Vec<i64> = sqlx::query_scalar(
         "SELECT a.id FROM actions a LEFT JOIN undos u ON u.action_id = a.id
          WHERE a.run_id = ? AND a.inverse IS NOT NULL AND u.action_id IS NULL ORDER BY a.id DESC",
@@ -196,7 +202,7 @@ pub async fn undo_run(db: &SqlitePool, snapshots: &Path, run_id: i64, force: boo
     .fetch_all(db)
     .await?;
     for (n, id) in ids.iter().enumerate() {
-        undo(db, snapshots, *id, force).await.with_context(|| format!("undid {n} of {} actions", ids.len()))?;
+        undo(db, snapshots, remote, *id, force).await.with_context(|| format!("undid {n} of {} actions", ids.len()))?;
     }
     Ok(ids.len())
 }
@@ -244,24 +250,24 @@ mod tests {
         let inv = snapshot(&snaps, &f, Some(b"new")).unwrap();
         std::fs::write(&f, "new").unwrap();
         let a = record(&db, entry(&input, Some(&inv))).await.unwrap();
-        undo(&db, &snaps, a, false).await.unwrap();
+        undo(&db, &snaps, None, a, false).await.unwrap();
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "old");
-        assert!(undo(&db, &snaps, a, false).await.is_err(), "double undo");
+        assert!(undo(&db, &snaps, None, a, false).await.is_err(), "double undo");
 
         // new file → undo deletes
         let g = tmp.path().join("new.txt");
         let inv = snapshot(&snaps, &g, Some(b"hi")).unwrap();
         std::fs::write(&g, "hi").unwrap();
         let b = record(&db, entry(&input, Some(&inv))).await.unwrap();
-        undo(&db, &snaps, b, false).await.unwrap();
+        undo(&db, &snaps, None, b, false).await.unwrap();
         assert!(!g.exists());
 
         // someone edited after the agent → refuse unless forced
         let inv = snapshot(&snaps, &f, Some(b"agent")).unwrap();
         std::fs::write(&f, "user edit").unwrap();
         let c = record(&db, entry(&input, Some(&inv))).await.unwrap();
-        assert!(undo(&db, &snaps, c, false).await.is_err());
-        undo(&db, &snaps, c, true).await.unwrap();
+        assert!(undo(&db, &snaps, None, c, false).await.is_err());
+        undo(&db, &snaps, None, c, true).await.unwrap();
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "old");
 
         // run undo: two writes to one file undone newest first
@@ -271,7 +277,7 @@ mod tests {
         let inv2 = snapshot(&snaps, &f, Some(b"v2")).unwrap();
         std::fs::write(&f, "v2").unwrap();
         record(&db, Entry { run_id: 2, ..entry(&input, Some(&inv2)) }).await.unwrap();
-        assert_eq!(undo_run(&db, &snaps, 2, false).await.unwrap(), 2);
+        assert_eq!(undo_run(&db, &snaps, None, 2, false).await.unwrap(), 2);
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "old");
     }
 }

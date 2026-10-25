@@ -4,10 +4,15 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 
 export type Rule = "allow" | "ask" | "deny";
 export const TOOLS = ["list_dir", "read_file", "write_file", "delete_file", "shell", "http_fetch",
-  "notes_add", "notes_search", "web_search"] as const;
+  "notes_add", "notes_search", "web_search", "email_search", "email_read", "email_move", "email_send",
+  "calendar_list", "calendar_create", "calendar_update", "calendar_delete",
+  "github_issues", "github_comment", "github_label", "github_close"] as const;
 export const DEFAULT_RULES: Record<string, Rule> = {
   list_dir: "allow", read_file: "allow", write_file: "allow", delete_file: "ask", shell: "ask", http_fetch: "ask",
   notes_add: "allow", notes_search: "allow", web_search: "allow",
+  email_search: "allow", email_read: "allow", email_move: "allow", email_send: "ask",
+  calendar_list: "allow", calendar_create: "allow", calendar_update: "allow", calendar_delete: "ask",
+  github_issues: "allow", github_comment: "ask", github_label: "allow", github_close: "ask",
 };
 
 export type Agent = {
@@ -36,8 +41,11 @@ export type Run = { id: number; started_at: string; ended_at: string | null; sta
 export type ModelCall = {
   run_id: number; model: string; prompt_tokens: number | null; completion_tokens: number | null; ms: number; created_at: string;
 };
+export type Connection = {
+  name: string; kind: "email" | "calendar" | "github"; config: Record<string, string | number | string[]>; agent_ids: number[];
+};
 export type Schedule = {
-  id: number; agent_id: number; kind: "cron" | "interval" | "file"; spec: string; prompt: string; enabled: boolean;
+  id: number; agent_id: number; kind: "cron" | "interval" | "file" | "email" | "calendar" | "github"; spec: string; prompt: string; enabled: boolean;
   next_run_at: number | null; last_run_at: number | null;
 };
 export type CatalogModel = { id: string; name: string; size: number; min_ram_gb: number; installed: boolean; downloading: boolean };

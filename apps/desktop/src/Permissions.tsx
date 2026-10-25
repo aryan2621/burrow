@@ -7,6 +7,10 @@ const LABEL: Record<string, string> = {
   list_dir: "List folders", read_file: "Read files", write_file: "Write files (undoable)",
   delete_file: "Delete files (undoable)", shell: "Run shell in sandbox", http_fetch: "Web access to non-allowlisted sites",
   notes_add: "Save notes (undoable)", notes_search: "Search notes", web_search: "Web search (if configured)",
+  email_search: "List emails", email_read: "Read emails", email_move: "Move emails (undoable)",
+  email_send: "Send email (60 s to cancel)", calendar_list: "List events", calendar_create: "Create events (undoable)",
+  calendar_update: "Change events (undoable)", calendar_delete: "Delete events (undoable)", github_issues: "Read GitHub issues",
+  github_comment: "Comment on GitHub (undoable)", github_label: "Label issues (undoable)", github_close: "Close issues (undoable)",
 };
 
 /** Allowed domains plus allow/ask/deny per tool. Rules equal to the default are not stored. */
