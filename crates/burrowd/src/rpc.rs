@@ -1,6 +1,6 @@
 use crate::agent::{self, State};
 use crate::queue::Priority;
-use crate::{artifacts, backup, connectors, rooms, routines, download, notes, hardware, journal, mcp, models, policy, schedule, search, secrets, service, store};
+use crate::{backup, connectors, routines, download, notes, hardware, journal, mcp, models, oauth, plugins, policy, team, schedule, search, secrets, service, store};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -120,6 +120,24 @@ async fn handle<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, st: Arc<S
     let _ = writer.await;
 }
 
+fn folders(v: &Value) -> Result<Vec<PathBuf>> {
+    let mut out: Vec<PathBuf> = vec![];
+    for f in v.as_array().context("missing `folders`")? {
+        let raw = f.as_str().context("folder must be a string")?.trim();
+        let f = match raw.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) =>
+                dirs::home_dir().context("no home directory")?.join(rest.trim_start_matches(['/', '\\'])),
+            _ => PathBuf::from(raw),
+        };
+        anyhow::ensure!(f.is_absolute() && f.is_dir(), "{} is not an existing absolute directory", f.display());
+        let f = f.canonicalize()?;
+        if !out.contains(&f) {
+            out.push(f);
+        }
+    }
+    Ok(out)
+}
+
 fn domains(v: &Value) -> Result<Vec<String>> {
     v.as_array().map(|a| a.iter().map(|d| {
         let d = d.as_str().context("domain must be a string")?.trim().to_lowercase();
@@ -149,16 +167,15 @@ fn limits(v: &Value, cur: store::Limits) -> Result<store::Limits> {
     anyhow::ensure!((1..=200).contains(&l.max_steps), "max_steps must be 1–200");
     anyhow::ensure!((10..=24 * 3600).contains(&l.max_run_secs), "max_run_secs must be 10–86400");
     anyhow::ensure!((1_000..=10_000_000).contains(&l.max_run_tokens), "max_run_tokens must be 1000–10000000");
+    anyhow::ensure!((1..=16).contains(&l.cpus), "cpus must be 1–16");
+    anyhow::ensure!((512..=65_536).contains(&l.memory_mb), "memory_mb must be 512–65536");
     anyhow::ensure!(l.monthly_usd >= 0.0, "monthly_usd can't be negative");
-    if let Some(m) = &l.cheap_model_ref {
-        models::parse_ref(m)?;
-    }
     Ok(l)
 }
 
 /// UI preferences only; settings with their own validation (search) have their own RPCs.
 fn setting_key(k: &str) -> Result<&str> {
-    anyhow::ensure!(matches!(k, "onboarded" | "prices"), "unknown setting `{k}`");
+    anyhow::ensure!(matches!(k, "onboarded" | "prices" | "avatars"), "unknown setting `{k}`");
     Ok(k)
 }
 
@@ -173,7 +190,7 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
     let int = |k: &str| p[k].as_i64().with_context(|| format!("missing integer `{k}`"));
     let id = || int("agent_id");
     Ok(match method {
-        "status" => json!({"sandbox": st.sandbox.bin, "service_installed": service::installed().unwrap_or(false),
+        "status" => json!({"sandbox": st.sandbox.bin, "isolation": st.sandbox.isolation(), "service_installed": service::installed().unwrap_or(false),
             "keystore": match st.vault { secrets::Vault::Keychain => "keychain", secrets::Vault::File(_) => "file" },
             "search": search::name(&search::backend(&st.db, &st.vault).await?)}),
         "search.configure" => {
@@ -182,7 +199,7 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
         }
         "domains.presets" => json!({"package_registries": policy::PACKAGE_REGISTRIES}),
         "models.list" => {
-            let mut m = models::list(&st.http, &st.ollama_url, &st.llama, &st.home).await;
+            let mut m = models::list(&st.http, &st.llama, &st.home).await;
             m.extend(models::cloud(&st.http, &st.db, &st.vault).await);
             json!(m)
         }
@@ -191,13 +208,13 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
             models::configure(&st.db, &st.vault, p).await?;
             json!(true)
         }
-        "notes.list" => json!(notes::list(&st.db, id()?, p["query"].as_str().unwrap_or("")).await?),
+        "notes.list" => json!(notes::list(st, id()?, p["query"].as_str().unwrap_or("")).await?),
         "notes.update" => {
-            notes::update(&st.db, id()?, int("note_id")?, s("text")?).await?;
+            notes::update(st, id()?, int("note_id")?, s("text")?).await?;
             json!(true)
         }
         "notes.delete" => {
-            notes::delete(&st.db, int("note_id")?).await?;
+            notes::delete_for(&st.db, id()?, int("note_id")?).await?;
             json!(true)
         }
         "connections.list" => json!(connectors::list(&st.db).await?),
@@ -207,34 +224,6 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
         }
         "connections.delete" => {
             connectors::delete(&st.db, &st.vault, s("name")?).await?;
-            json!(true)
-        }
-        "rooms.list" => json!(rooms::list(&st.db).await?),
-        "rooms.create" => json!(rooms::create(&st.db, p).await?),
-        "rooms.delete" => {
-            rooms::delete(&st.db, int("room_id")?).await?;
-            json!(true)
-        }
-        "rooms.messages" => json!(rooms::messages(&st.db, int("room_id")?).await?),
-        "rooms.post" => {
-            rooms::post(st, int("room_id")?, None, s("text")?).await?;
-            json!(true)
-        }
-        "tasks.list" => json!(rooms::tasks(&st.db, int("room_id")?).await?),
-        "tasks.save" => json!(rooms::upsert_task(&st.db, int("room_id")?, p).await?),
-        "tasks.delete" => {
-            sqlx::query("DELETE FROM tasks WHERE id = ?").bind(int("id")?).execute(&st.db).await?;
-            json!(true)
-        }
-        "artifacts.list" => json!(artifacts::list(&st.db).await?),
-        "artifacts.versions" => json!(artifacts::versions(&st.db, int("id")?).await?),
-        "artifacts.content" => artifacts::content(&st.db, int("version_id")?).await?,
-        "artifacts.share" => {
-            artifacts::share(&st.db, int("id")?, id()?, &p["write"]).await?;
-            json!(true)
-        }
-        "artifacts.delete" => {
-            artifacts::delete(&st.db, int("id")?).await?;
             json!(true)
         }
         "routines.list" => json!(routines::list(&st.db, id()?).await?),
@@ -288,21 +277,10 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
             download::cancel(st, s("id")?)?;
             json!(true)
         }
-        "models.pull" => {
-            models::pull(&st.http, &st.ollama_url, s("name")?).await?;
-            json!(true)
-        }
         "agents.list" => json!(store::agents(&st.db).await?),
         "agents.create" => {
             models::parse_ref(s("model_ref")?)?;
-            let folders = p["folders"].as_array().context("missing `folders`")?.iter()
-                .map(|f| {
-                    let f = PathBuf::from(f.as_str().context("folder must be a string")?);
-                    anyhow::ensure!(f.is_absolute() && f.is_dir(), "{} is not an existing absolute directory", f.display());
-                    Ok(f.canonicalize()?)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            anyhow::ensure!(!folders.is_empty(), "give the agent at least one folder");
+            let folders = folders(&p["folders"])?;
             let a = store::Agent { id: 0, name: s("name")?.into(), role_prompt: s("role_prompt")?.into(),
                 model_ref: s("model_ref")?.into(), folders,
                 allowed_domains: domains(&p["allowed_domains"])?, approval_rules: rules(&p["approval_rules"])?,
@@ -311,8 +289,19 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
         }
         "agents.update" => {
             let mut a = store::get_agent(&st.db, id()?).await?;
+            let prev_folders = a.folders.clone();
+            let prev_size = (a.limits.cpus, a.limits.memory_mb);
+            if p.get("folders").is_some() {
+                a.folders = folders(&p["folders"])?;
+            }
             a.allowed_domains = domains(&p["allowed_domains"])?;
             a.approval_rules = rules(&p["approval_rules"])?;
+            for (k, dst) in [("name", &mut a.name), ("role_prompt", &mut a.role_prompt)] {
+                if let Some(v) = p[k].as_str() {
+                    anyhow::ensure!(!v.trim().is_empty(), "{k} can't be empty");
+                    *dst = v.trim().into();
+                }
+            }
             if let Some(b) = budget(&p["context_budget"])? {
                 a.context_budget = b;
             }
@@ -321,7 +310,10 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
                 models::parse_ref(m)?;
                 a.model_ref = m.into();
             }
-            store::update_permissions(&st.db, &a).await?;
+            store::update_agent(&st.db, &a).await?;
+            if a.folders != prev_folders || (a.limits.cpus, a.limits.memory_mb) != prev_size {
+                st.sandbox.stop(a.id).await;
+            }
             json!(true)
         }
         "agents.delete" => {
@@ -333,6 +325,13 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
         "agents.kill" => {
             agent::kill(st, id()?).await?;
             json!(true)
+        }
+        "agents.stop_all" => {
+            let ids: Vec<i64> = st.running.lock().unwrap().keys().copied().collect();
+            for id in &ids {
+                agent::kill(st, *id).await?;
+            }
+            json!(ids.len())
         }
         "chat.history" => json!(store::messages(&st.db, id()?).await?),
         "chat.send" => {
@@ -353,6 +352,10 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
             secrets::set(&st.db, &st.vault, p).await?;
             json!(true)
         }
+        "agents.restore_access" => {
+            secrets::restore(&st.db, id()?).await?;
+            json!(true)
+        }
         "secrets.list" => json!(secrets::list(&st.db).await?),
         "secrets.delete" => {
             secrets::delete(&st.db, &st.vault, s("name")?).await?;
@@ -363,6 +366,12 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
             store::get_agent(&st.db, id()?).await?;
             json!({"warnings": mcp::add(&st.db, p).await?})
         }
+        "team.propose" => team::propose(st, p).await?,
+        "team.start" => { team::start(st, p).await?; json!(true) }
+        "plugins.search" => json!(plugins::search(st, s("query")?).await?),
+        "plugins.add_community" => json!({"warnings": plugins::add_community(st, p).await?}),
+        "plugins.catalog" => json!(plugins::catalog()),
+        "plugins.attach" => json!({"warnings": plugins::attach(st, p).await?}),
         "mcp.add_browser" => {
             store::get_agent(&st.db, id()?).await?;
             mcp::add(&st.db, &json!({"agent_id": id()?, "name": "browser", "transport": "stdio", "command": mcp::BROWSER})).await?;
@@ -378,6 +387,7 @@ async fn dispatch(st: &Arc<State>, method: &str, p: &Value) -> Result<Value> {
         }
         "mcp.remove" => {
             mcp::remove(&st.db, id()?, s("name")?).await?;
+            oauth::forget(st, id()?, s("name")?).await;
             json!(true)
         }
         "settings.get" => {

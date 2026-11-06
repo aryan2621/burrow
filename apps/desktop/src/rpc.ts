@@ -1,18 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { ask, open, save } from "@tauri-apps/plugin-dialog";
 
 export type Rule = "allow" | "ask" | "deny";
 export const TOOLS = ["list_dir", "read_file", "write_file", "delete_file", "shell", "http_fetch",
-  "notes_add", "notes_search", "web_search", "email_search", "email_read", "email_move", "email_send",
-  "calendar_list", "calendar_create", "calendar_update", "calendar_delete",
-  "github_issues", "github_comment", "github_label", "github_close"] as const;
+  "notes_add", "notes_search", "web_search", "email_search", "email_read", "email_move", "email_draft", "email_send", "delegate"] as const;
 export const DEFAULT_RULES: Record<string, Rule> = {
   list_dir: "allow", read_file: "allow", write_file: "allow", delete_file: "ask", shell: "ask", http_fetch: "ask",
   notes_add: "allow", notes_search: "allow", web_search: "allow",
-  email_search: "allow", email_read: "allow", email_move: "allow", email_send: "ask",
-  calendar_list: "allow", calendar_create: "allow", calendar_update: "allow", calendar_delete: "ask",
-  github_issues: "allow", github_comment: "ask", github_label: "allow", github_close: "ask",
+  email_search: "allow", email_read: "allow", email_move: "allow", email_draft: "allow", email_send: "ask", delegate: "deny",
 };
 
 export type Agent = {
@@ -20,19 +16,12 @@ export type Agent = {
   allowed_domains: string[]; approval_rules: Record<string, Rule>; context_budget: number; limits: Limits;
 };
 export type Limits = {
-  max_steps: number; max_run_secs: number; max_run_tokens: number; review: boolean; monthly_usd: number; cheap_model_ref: string | null;
+  max_steps: number; max_run_secs: number; max_run_tokens: number; review: boolean; monthly_usd: number; cpus: number; memory_mb: number;
 };
-export type Room = { id: number; name: string; coordinator_id: number; agent_ids: number[] };
-export type RoomMessage = { id: number; agent_id: number | null; text: string; created_at: string };
-export type Task = { id: number; title: string; assignee_id: number | null; status: "todo" | "doing" | "done" };
-export type Artifact = {
-  id: number; name: string; owner_id: number; room_id: number | null; latest: number; created_at: string; access: { agent_id: number; write: number }[];
-};
-export type ArtifactVersion = { id: number; version: number; author_id: number; size: number; created_at: string };
 export type Routine = { id: number; name: string; prompt: string; tools: string[]; approved: string[] };
 export type Cost = { agent_id: number; total_usd: number; month_usd: number; unpriced_calls: number };
 export type Note = { id: number; text: string; created_at: string };
-export type Providers = Record<"anthropic" | "openai", { configured: boolean; base_url?: string }>;
+export type Providers = Record<"anthropic" | "openai" | "gemini" | "custom", { configured: boolean; base_url?: string }>;
 export type Message = {
   role: "user" | "assistant" | "tool" | "system";
   content: string;
@@ -43,7 +32,7 @@ export type Action = {
   id: number; run_id: number; tool: string; input: Record<string, unknown>; output: string;
   undoable: boolean; decision: string; created_at: number; undone_at: string | null;
 };
-export type Event = {
+type Event = {
   method: string;
   params: { agent_id: number; text?: string; error?: string | null; trigger?: string;
     id?: string; done?: number; total?: number } & Partial<Approval>;
@@ -54,17 +43,18 @@ export type ModelCall = {
   cost_usd: number | null;
 };
 export type Connection = {
-  name: string; kind: "email" | "calendar" | "github"; config: Record<string, string | number | string[]>; agent_ids: number[];
+  name: string; kind: "email"; config: Record<string, string | number>; agent_ids: number[];
 };
 export type Schedule = {
-  id: number; agent_id: number; kind: "cron" | "interval" | "file" | "email" | "calendar" | "github"; spec: string; prompt: string; enabled: boolean;
+  id: number; agent_id: number; kind: "cron" | "interval" | "file" | "email"; spec: string; prompt: string; enabled: boolean;
   next_run_at: number | null; last_run_at: number | null; routine_id: number | null;
 };
 export type CatalogModel = { id: string; name: string; size: number; min_ram_gb: number; installed: boolean; downloading: boolean };
-export type Hardware = { ram_gb: number; cores: number; os: string; arch: string; gpu: string; recommended: string | null };
+export type Hardware = { ram_gb: number; free_disk_gb: number; vram_gb: number | null; cores: number; os: string; arch: string; gpu: string; recommended: string | null };
 export type McpServer = { name: string; transport: "stdio" | "http"; command: string[]; url: string | null; secrets: string[] };
-export type Secret = { name: string; agent_ids: number[]; hosts: string[]; header: string };
-export type Status = { sandbox: string | null; service_installed: boolean; keystore: string; search: string | null };
+export type Plugin = { id: string; name: string; description: string; auth: "none" | "key" | "oauth"; secret: { hint: string } | null };
+export type Secret = { name: string; agent_ids: number[]; hosts: string[]; header: string; expires_at?: string | null; suspended?: number[] };
+export type Status = { sandbox: string | null; isolation?: "vm" | "container"; service_installed: boolean; keystore: string; search: string | null };
 
 export const rpc = <T,>(method: string, params: object = {}) => invoke<T>("rpc", { method, params });
 export const onEvent = (f: (e: Event) => void) => listen<Event>("burrow", (e) => f(e.payload));
@@ -84,8 +74,7 @@ export const pickFile = async () => {
 
 export const pickSavePath = (defaultPath: string) => save({ defaultPath });
 
-export const ui = {
-  input: "w-full rounded border border-stone-300 bg-white px-2 py-1 dark:border-stone-700 dark:bg-stone-800",
-  button: "rounded border border-stone-300 px-3 py-1 text-sm hover:bg-stone-100 dark:border-stone-700 dark:hover:bg-stone-800",
-  primary: "rounded bg-amber-800 px-4 py-1.5 text-white disabled:opacity-50",
-};
+/** A native yes/no that waits for the answer: window.confirm doesn't block in the Tauri webview. */
+export const confirmAction = (message: string, okLabel = "Delete") =>
+  ask(message, { title: "Burrow", kind: "warning", okLabel, cancelLabel: "Cancel" });
+

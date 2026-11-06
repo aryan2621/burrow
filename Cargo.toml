@@ -1,3 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/burrowd", "apps/desktop/src-tauri"]
+
+# dev builds hash multi-GB model files; unoptimized SHA-256 takes minutes
+[profile.dev.package.sha2]
+opt-level = 3

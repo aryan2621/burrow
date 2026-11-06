@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-type Client = RunningService<RoleClient, ()>;
+pub type Client = RunningService<RoleClient, ()>;
 
 fn valid_name(n: &str) -> bool {
     !n.is_empty() && n.len() <= 20 && !n.contains("__") && n.chars().all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
@@ -47,7 +47,7 @@ pub async fn add(db: &SqlitePool, p: &Value) -> Result<Vec<String>> {
     }
     let warnings = match package_ref(&command) {
         Some(r) => antidote_check(&r).await?,
-        None => vec![],
+        None => vec!["not scanned: Antidote only checks npx, bunx and uvx servers".into()],
     };
     let secrets: Vec<String> = serde_json::from_value(p["secrets"].clone()).unwrap_or_default();
     sqlx::query("INSERT INTO mcp_servers (agent_id, name, transport, command, url, secrets) VALUES (?, ?, ?, ?, ?, ?)
@@ -81,7 +81,7 @@ fn package_ref(argv: &[String]) -> Option<String> {
 /// Look the package up with the `antidote` scanner when it's installed; no scanner means no check.
 async fn antidote_check(pkg: &str) -> Result<Vec<String>> {
     if !crate::sandbox::on_path("antidote") {
-        return Ok(vec![]);
+        return Ok(vec![format!("not scanned: antidote is not installed ({pkg})")]);
     }
     let run = tokio::process::Command::new("antidote").args(["check", pkg, "--format", "json", "--fail-on", "never"]).output();
     let findings: Vec<Value> = match tokio::time::timeout(std::time::Duration::from_secs(20), run).await {
@@ -117,7 +117,7 @@ pub struct Session {
 /// The one-click browser: Playwright's MCP server baked into the sandbox image, its Chromium
 /// sent through the agent's egress proxy.
 pub const BROWSER: &[&str] = &["sh", "-c",
-    "exec playwright-mcp --headless --isolated --no-sandbox --browser chromium --proxy-server \"$HTTPS_PROXY\""];
+    r#"node -e 'const u=new URL(process.env.HTTPS_PROXY);require("fs").writeFileSync("/tmp/pw.json",JSON.stringify({browser:{launchOptions:{proxy:{server:u.protocol+"//"+u.host,username:decodeURIComponent(u.username),password:decodeURIComponent(u.password)}}}}))' && exec playwright-mcp --headless --isolated --no-sandbox --browser chromium --config /tmp/pw.json"#];
 
 impl Session {
     /// Connect to every server; one that fails is reported in `errors` and skipped.
@@ -142,6 +142,9 @@ impl Session {
                     let names: Vec<String> = serde_json::from_value(srv["secrets"].clone())?;
                     let host = fetch::host_of(url, &agent.allowed_domains)?;
                     anyhow::ensure!(fetch::allowed(&agent.allowed_domains, &host), "{host} is not in the agent's allowed domains");
+                    if let Some(c) = crate::oauth::connect(st, agent.id, &name, url, agent.allowed_domains.clone()).await? {
+                        return Ok(c);
+                    }
                     let headers = secrets::for_host(bound, &host).into_iter().filter(|b| names.contains(&b.name))
                         .filter_map(|b| b.header_pair()).collect();
                     http(url, headers, agent.allowed_domains.clone()).await
@@ -330,8 +333,8 @@ for line in sys.stdin:
     async fn sandbox_mcp_stdio() {
         use crate::{policy, sandbox::Sandbox, secrets::Vault};
         let tmp = tempfile::tempdir().unwrap();
-        let st = Arc::new(State::new(tmp.path().to_path_buf(), String::new(), String::new(), Sandbox::detect(), Vault::File(tmp.path().join("keys"))).await.unwrap());
-        let mut a = store::Agent { id: 0, name: "m".into(), role_prompt: "".into(), model_ref: "ollama:x".into(), folders: vec![],
+        let st = Arc::new(State::new(tmp.path().to_path_buf(), String::new(), Sandbox::detect(), Vault::File(tmp.path().join("keys"))).await.unwrap());
+        let mut a = store::Agent { id: 0, name: "m".into(), role_prompt: "".into(), model_ref: "llama:x".into(), folders: vec![],
             allowed_domains: policy::PACKAGE_REGISTRIES.iter().map(|d| d.to_string()).collect(), approval_rules: Default::default(), context_budget: 8_000, limits: Default::default() };
         a.id = store::create_agent(&st.db, &a).await.unwrap();
         add(&st.db, &json!({"agent_id": a.id, "name": "everything", "transport": "stdio",

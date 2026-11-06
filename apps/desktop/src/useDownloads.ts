@@ -19,5 +19,7 @@ export default function useDownloads(onFinished: () => void) {
     });
     return () => void un.then((f) => f());
   }, []);
-  return { progress, errors };
+  /** Drop progress for downloads the daemon no longer runs (e.g. it restarted mid-download). */
+  const settle = (active: string[]) => setProgress((p) => Object.fromEntries(Object.entries(p).filter(([id]) => active.includes(id))));
+  return { progress, errors, settle };
 }

@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
-import { Agent, Note, rpc, sqlTime, ui } from "./rpc";
+import { BrainIcon, PencilIcon, SearchIcon, Trash2Icon } from "lucide-react";
+import { Agent, Note, confirmAction, rpc, sqlTime } from "./rpc";
+import { Status } from "@/components/settings";
+import { EmptyState } from "@/components/panel";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Item, ItemActions, ItemContent, ItemFooter, ItemGroup } from "@/components/ui/item";
+import { Textarea } from "@/components/ui/textarea";
 
 /** The agent's notes: search, edit and delete what it remembers. */
 export default function Memory({ agent }: { agent: Agent }) {
@@ -11,38 +18,45 @@ export default function Memory({ agent }: { agent: Agent }) {
   useEffect(() => void load(""), []);
   const call = (method: string, p: object) => rpc(method, { agent_id: agent.id, ...p }).then(() => { setEditing(null); load(); }, (e) => setError(String(e)));
   return (
-    <div className="h-full max-w-2xl space-y-3 overflow-y-auto p-4">
-      <input aria-label="Search notes" className={ui.input} placeholder="Search notes" value={query}
-        onChange={(e) => { setQuery(e.target.value); load(e.target.value); }} />
-      {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
-      {notes.length === 0 && <p className="text-sm text-stone-500">{query ? "No matching notes." : "This agent hasn't saved any notes."}</p>}
-      <ul className="space-y-2">
+    <>
+      <div className="relative">
+        <SearchIcon aria-hidden="true" className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+        <Input aria-label="Search notes" placeholder={`Search ${notes.length} note${notes.length === 1 ? "" : "s"}`} className="pl-8" value={query}
+          onChange={(e) => { setQuery(e.target.value); load(e.target.value); }} />
+      </div>
+      <Status msg={error} />
+      <ItemGroup className="mt-4 gap-2">
+        {notes.length === 0 && (
+          <EmptyState icon={query ? <SearchIcon /> : <BrainIcon />} title={query ? "No matching notes" : "Nothing remembered yet"}>
+            {query ? "Try other words." : `${agent.name} saves notes here when it learns something worth keeping.`}
+          </EmptyState>
+        )}
         {notes.map((n) => (
-          <li key={n.id} className="rounded border border-stone-200 p-2 text-sm dark:border-stone-700">
+          <Item key={n.id} variant="outline" size="sm" className="bg-card">
             {editing?.id === n.id ? (
-              <div className="space-y-2">
-                <textarea aria-label="Note text" className={ui.input} rows={4} value={editing.text}
-                  onChange={(e) => setEditing({ id: n.id, text: e.target.value })} />
+              <div className="w-full space-y-2">
+                <Textarea aria-label="Note text" rows={4} value={editing.text} onChange={(e) => setEditing({ id: n.id, text: e.target.value })} />
                 <div className="flex gap-2">
-                  <button className={ui.button} onClick={() => call("notes.update", { note_id: n.id, text: editing.text })}>Save</button>
-                  <button className={ui.button} onClick={() => setEditing(null)}>Cancel</button>
+                  <Button size="sm" onClick={() => call("notes.update", { note_id: n.id, text: editing.text })}>Save</Button>
+                  <Button size="sm" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
                 </div>
               </div>
             ) : (
               <>
-                <p className="whitespace-pre-wrap">{n.text}</p>
-                <div className="mt-1 flex items-center justify-between text-xs text-stone-500">
-                  <span>{sqlTime(n.created_at).toLocaleString()}</span>
-                  <span className="flex gap-2">
-                    <button className={ui.button} onClick={() => setEditing({ id: n.id, text: n.text })}>Edit</button>
-                    <button className={ui.button} onClick={() => confirm("Delete this note?") && call("notes.delete", { note_id: n.id })}>Delete</button>
-                  </span>
-                </div>
+                <ItemContent className="min-w-0">
+                  <p className="whitespace-pre-wrap leading-relaxed">{n.text}</p>
+                </ItemContent>
+                <ItemActions className="self-start opacity-50 transition-opacity group-hover/item:opacity-100 group-focus-within/item:opacity-100">
+                  <Button size="icon-sm" variant="ghost" aria-label="Edit note" onClick={() => setEditing({ id: n.id, text: n.text })}><PencilIcon /></Button>
+                  <Button size="icon-sm" variant="ghost" aria-label="Delete note" className="hover:text-destructive"
+                    onClick={async () => (await confirmAction("Delete this note?")) && call("notes.delete", { note_id: n.id })}><Trash2Icon /></Button>
+                </ItemActions>
+                <ItemFooter className="text-xs text-muted-foreground">{sqlTime(n.created_at).toLocaleString()}</ItemFooter>
               </>
             )}
-          </li>
+          </Item>
         ))}
-      </ul>
-    </div>
+      </ItemGroup>
+    </>
   );
 }

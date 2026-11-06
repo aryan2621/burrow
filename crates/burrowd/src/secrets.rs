@@ -147,9 +147,15 @@ pub async fn set(db: &SqlitePool, vault: &Vault, p: &Value) -> Result<()> {
     } else if vault.get(&secret_key(name)).await?.is_none() {
         bail!("missing `value`");
     }
-    sqlx::query("INSERT INTO secrets (name, agent_ids, hosts, header) VALUES (?, ?, ?, ?)
-                 ON CONFLICT(name) DO UPDATE SET agent_ids = excluded.agent_ids, hosts = excluded.hosts, header = excluded.header")
-        .bind(name).bind(json!(ids).to_string()).bind(json!(hosts).to_string()).bind(header)
+    // short-lived: the binding stops working after this many hours (a leaked key is one agent, one scope, a short time)
+    let expires = match p["expires_in_hours"].as_f64() {
+        Some(h) if h > 0.0 => Some(format!("+{} seconds", (h * 3600.0) as i64)),
+        _ => None,
+    };
+    sqlx::query("INSERT INTO secrets (name, agent_ids, hosts, header, expires_at) VALUES (?, ?, ?, ?, datetime('now', ?))
+                 ON CONFLICT(name) DO UPDATE SET agent_ids = excluded.agent_ids, hosts = excluded.hosts, header = excluded.header,
+                 expires_at = excluded.expires_at")
+        .bind(name).bind(json!(ids).to_string()).bind(json!(hosts).to_string()).bind(header).bind(expires)
         .execute(db).await?;
     Ok(())
 }
@@ -159,7 +165,9 @@ pub async fn list(db: &SqlitePool) -> Result<Vec<Value>> {
     let rows = sqlx::query("SELECT * FROM secrets ORDER BY name").fetch_all(db).await?;
     rows.iter().map(|r| Ok(json!({"name": r.get::<String, _>("name"),
         "agent_ids": serde_json::from_str::<Value>(r.get("agent_ids"))?,
-        "hosts": serde_json::from_str::<Value>(r.get("hosts"))?, "header": r.get::<String, _>("header")}))).collect()
+        "hosts": serde_json::from_str::<Value>(r.get("hosts"))?, "header": r.get::<String, _>("header"),
+        "expires_at": r.get::<Option<String>, _>("expires_at"),
+        "suspended": serde_json::from_str::<Value>(r.get("suspended"))?}))).collect()
 }
 
 pub async fn delete(db: &SqlitePool, vault: &Vault, name: &str) -> Result<()> {
@@ -168,14 +176,28 @@ pub async fn delete(db: &SqlitePool, vault: &Vault, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Unbind an agent from every secret (kill switch).
+/// Kill switch: move an agent's bindings to `suspended`; they do nothing until `restore`.
 pub async fn revoke(db: &SqlitePool, agent_id: i64) -> Result<()> {
-    for r in sqlx::query("SELECT name, agent_ids FROM secrets").fetch_all(db).await? {
-        let ids: Vec<i64> = serde_json::from_str(r.get("agent_ids")).unwrap_or_default();
-        if ids.contains(&agent_id) {
-            let ids: Vec<i64> = ids.into_iter().filter(|i| *i != agent_id).collect();
-            sqlx::query("UPDATE secrets SET agent_ids = ? WHERE name = ?")
-                .bind(json!(ids).to_string()).bind(r.get::<String, _>("name")).execute(db).await?;
+    shift(db, agent_id, "agent_ids", "suspended").await
+}
+
+/// The user's explicit "give it its secrets back" after a kill.
+pub async fn restore(db: &SqlitePool, agent_id: i64) -> Result<()> {
+    shift(db, agent_id, "suspended", "agent_ids").await
+}
+
+async fn shift(db: &SqlitePool, agent_id: i64, from: &str, to: &str) -> Result<()> {
+    for r in sqlx::query("SELECT name, agent_ids, suspended FROM secrets").fetch_all(db).await? {
+        let mut src: Vec<i64> = serde_json::from_str(r.get(from)).unwrap_or_default();
+        let mut dst: Vec<i64> = serde_json::from_str(r.get(to)).unwrap_or_default();
+        if src.contains(&agent_id) {
+            src.retain(|i| *i != agent_id);
+            if !dst.contains(&agent_id) {
+                dst.push(agent_id);
+            }
+            // column names are the two constants above, never user input
+            sqlx::query(&format!("UPDATE secrets SET {from} = ?, {to} = ? WHERE name = ?"))
+                .bind(json!(src).to_string()).bind(json!(dst).to_string()).bind(r.get::<String, _>("name")).execute(db).await?;
         }
     }
     Ok(())
@@ -184,7 +206,7 @@ pub async fn revoke(db: &SqlitePool, agent_id: i64) -> Result<()> {
 /// Secrets this agent may use, with values.
 pub async fn for_agent(db: &SqlitePool, vault: &Vault, agent_id: i64) -> Result<Vec<Bound>> {
     let mut out = vec![];
-    for r in sqlx::query("SELECT * FROM secrets").fetch_all(db).await? {
+    for r in sqlx::query("SELECT * FROM secrets WHERE expires_at IS NULL OR expires_at > datetime('now')").fetch_all(db).await? {
         let ids: Vec<i64> = serde_json::from_str(r.get("agent_ids")).unwrap_or_default();
         if !ids.contains(&agent_id) {
             continue;

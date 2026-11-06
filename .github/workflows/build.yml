@@ -1,7 +1,11 @@
-name: Release
+name: Build
+# Every push to main (and a manual run) builds unsigned installers for all platforms and attaches them to the run;
+# a v* tag also publishes them as a draft release.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -14,7 +18,7 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
@@ -69,6 +73,8 @@ jobs:
         with:
           projectPath: apps/desktop
           args: --target ${{ matrix.target }} --config src-tauri/tauri.release.conf.json
-          tagName: ${{ github.ref_name }}
+          # empty on branch builds: tauri-action then only builds
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: Burrow ${{ github.ref_name }}
           releaseDraft: true
+          uploadWorkflowArtifacts: true

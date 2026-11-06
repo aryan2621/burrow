@@ -1,5 +1,4 @@
 mod agent;
-mod artifacts;
 mod awake;
 mod backup;
 mod compact;
@@ -12,10 +11,11 @@ mod llama;
 mod mcp;
 mod models;
 mod notes;
+mod oauth;
+mod plugins;
 mod policy;
 mod proxy;
 mod queue;
-mod rooms;
 mod routines;
 mod rpc;
 mod sandbox;
@@ -24,6 +24,7 @@ mod search;
 mod secrets;
 mod service;
 mod store;
+mod team;
 mod tools;
 
 use anyhow::{Context, Result};
@@ -65,6 +66,13 @@ async fn main() -> Result<()> {
         }
         Some(other) => anyhow::bail!("unknown command `{other}`; use run, install, uninstall or status"),
     }
+    // One daemon per home: the app respawns on a slow start (e.g. a keychain prompt), and each
+    // extra copy would ask for the keychain again.
+    let lock = std::fs::File::create(home.join("burrowd.lock"))?;
+    if lock.try_lock().is_err() {
+        eprintln!("burrowd is already running");
+        return Ok(());
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -75,8 +83,7 @@ async fn main() -> Result<()> {
     let sandbox = sandbox::Sandbox::detect();
     eprintln!("sandbox runtime: {}", sandbox.bin.as_deref().unwrap_or("none (shell tool disabled)"));
     let vault = secrets::Vault::detect(&home).await;
-    let st = Arc::new(agent::State::new(home.clone(), env("BURROW_OLLAMA_URL", "http://127.0.0.1:11434"),
-        env("BURROW_LLAMA_URL", ""), sandbox, vault).await?);
+    let st = Arc::new(agent::State::new(home.clone(), env("BURROW_LLAMA_URL", ""), sandbox, vault).await?);
 
     tokio::spawn(schedule::run(st.clone()));
     tokio::spawn(awake::run(st.clone()));

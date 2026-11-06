@@ -1,0 +1,9 @@
+b11552
+macos/aarch64/cpu macos-arm64.tar.gz f4b33fe40d098033fb1a19a8a4a84383c4ca84c37b6a60d9f9a253f349b48c07
+macos/x86_64/cpu macos-x64.tar.gz b7977620cf5c30b8905caa45d7dbcc08766b5d4a94b3cde66ecf0323a495096f
+linux/x86_64/cpu ubuntu-x64.tar.gz a45a6afda05d08028bd37998072ab602c96799bccde126835941623cb99bb727
+linux/x86_64/vulkan ubuntu-vulkan-x64.tar.gz c7bb933f3584b73296fbadea6e0d6273ddb7907699ec59ef08d0bb59e0a8b997
+linux/aarch64/cpu ubuntu-arm64.tar.gz 8c5e5074c4e303308367471941b70a0f1fac4a1a35c7c67c0bec895d8df092f9
+windows/x86_64/cpu win-cpu-x64.zip c00741179811ff903b515eae28bdeef1f47af6e81c49920c4e68b62954e056d6
+windows/x86_64/vulkan win-vulkan-x64.zip 83dc16325b532ba603034719e8377e28ca5093c5d4370141a6522f1a0250386c
+windows/aarch64/cpu win-cpu-arm64.zip f4f181cca934b676c276d488d89a22e4d140f678332c43611f7f85c7fa0aedae

@@ -1,4 +1,4 @@
-//! Schedules: cron, fixed-interval, file-change and app-event (email, calendar, github) triggers
+//! Schedules: cron, fixed-interval, file-change and new-email triggers
 //! that start background runs.
 //! A busy agent keeps one firing queued and drops the rest. A time missed while the daemon
 //! was down fires once on the next tick.
@@ -40,15 +40,15 @@ pub fn next_after(kind: &str, spec: &str, from: i64) -> Result<Option<i64>> {
         }
         "file" => Ok(None),
         // app events are polled once a minute
-        "email" | "calendar" | "github" => Ok(Some(from + MIN_INTERVAL)),
-        _ => bail!("kind must be cron, interval, file, email, calendar or github"),
+        "email" => Ok(Some(from + MIN_INTERVAL)),
+        _ => bail!("kind must be cron, interval, file or email"),
     }
 }
 
 /// Check `spec` for `kind`; file paths must exist inside the agent's folders.
 async fn validate(db: &SqlitePool, agent_id: i64, kind: &str, spec: &str) -> Result<String> {
     next_after(kind, spec, now())?;
-    if matches!(kind, "email" | "calendar" | "github") {
+    if kind == "email" {
         connectors::validate_trigger(db, agent_id, kind, spec.trim()).await?;
         return Ok(spec.trim().to_string());
     }
@@ -142,7 +142,7 @@ async fn tick(st: &Arc<State>) -> Result<()> {
     for r in due {
         let (id, kind, spec): (i64, String, String) = (r.get("id"), r.get("kind"), r.get("spec"));
         // computed from now, not from the missed time: a long sleep fires once, not once per missed slot
-        if matches!(kind.as_str(), "email" | "calendar" | "github") {
+        if kind == "email" {
             sqlx::query("UPDATE schedules SET next_run_at = ? WHERE id = ?").bind(next_after(&kind, &spec, t)?).bind(id).execute(&st.db).await?;
             // shortcut: polls run one after another inside the tick; move them to their own task if many connections slow it
             match connectors::poll(st, &kind, &spec, r.get::<Option<String>, _>("cursor").as_deref()).await {
@@ -248,10 +248,10 @@ mod tests {
     use crate::{sandbox::Sandbox, secrets::Vault};
 
     async fn state(tmp: &std::path::Path, model_url: String) -> (Arc<State>, i64, PathBuf) {
-        let st = Arc::new(State::new(tmp.to_path_buf(), model_url, String::new(), Sandbox::detect(), Vault::File(tmp.join("keys"))).await.unwrap());
+        let st = Arc::new(State::new(tmp.to_path_buf(), model_url, Sandbox::detect(), Vault::File(tmp.join("keys"))).await.unwrap());
         let work = tmp.join("work");
         std::fs::create_dir_all(&work).unwrap();
-        let a = store::Agent { id: 0, name: "s".into(), role_prompt: "".into(), model_ref: "ollama:x".into(), folders: vec![work.canonicalize().unwrap()],
+        let a = store::Agent { id: 0, name: "s".into(), role_prompt: "".into(), model_ref: "llama:x".into(), folders: vec![work.canonicalize().unwrap()],
             allowed_domains: vec![], approval_rules: Default::default(), context_budget: 8_000, limits: store::Limits { review: false, ..Default::default() } };
         let id = store::create_agent(&st.db, &a).await.unwrap();
         (st, id, work.canonicalize().unwrap())

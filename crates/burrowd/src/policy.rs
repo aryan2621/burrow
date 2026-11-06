@@ -6,12 +6,11 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use tokio::sync::oneshot;
 
-pub const TOOLS: [&str; 9] = ["list_dir", "read_file", "write_file", "delete_file", "shell", "http_fetch",
-    "notes_add", "notes_search", "web_search"];
+pub const TOOLS: [&str; 10] = ["list_dir", "read_file", "write_file", "delete_file", "shell", "http_fetch",
+    "notes_add", "notes_search", "web_search", "delegate"];
 
 fn known(tool: &str) -> bool {
-    TOOLS.contains(&tool) || crate::connectors::TOOLS.contains(&tool) || crate::rooms::TOOLS.contains(&tool)
-        || crate::artifacts::TOOLS.contains(&tool) || tool.starts_with("mcp__")
+    TOOLS.contains(&tool) || crate::connectors::TOOLS.contains(&tool) || tool.starts_with("mcp__")
 }
 
 /// One click in the UI adds these, so pip, npm and git work in the sandbox.
@@ -26,13 +25,13 @@ pub enum Rule {
 }
 
 /// Reads and undoable writes run without asking; deletes, shell, new domains, MCP tools and
-/// anything other people see (email, comments, closing issues) ask.
+/// anything other people see (email) ask.
 pub fn default_rule(tool: &str) -> &'static str {
     match tool {
         "list_dir" | "read_file" | "write_file" | "notes_add" | "notes_search" | "web_search"
-        | "email_search" | "email_read" | "email_move" | "calendar_list" | "calendar_create" | "calendar_update"
-        | "github_issues" | "github_label" => "allow",
-        t if crate::rooms::TOOLS.contains(&t) || crate::artifacts::TOOLS.contains(&t) => "allow",
+        | "email_search" | "email_read" | "email_move" | "email_draft" => "allow",
+        // off until the user turns it on for a lead agent
+        "delegate" => "deny",
         _ => "ask",
     }
 }
@@ -74,7 +73,15 @@ pub async fn ask(st: &State, agent_id: i64, run_id: i64, tool: &str, args: &Valu
     let (tx, rx) = oneshot::channel();
     st.pending.lock().unwrap().insert(id, (agent_id, tx));
     st.emit("approval.requested", json!({"approval_id": id, "agent_id": agent_id, "tool": tool, "args": args}));
-    Ok(rx.await.unwrap_or(false))
+    match tokio::time::timeout(std::time::Duration::from_secs(30 * 60), rx).await {
+        Ok(r) => Ok(r.unwrap_or(false)),
+        Err(_) => {
+            // nobody answered: deny so the run doesn't hang forever
+            st.pending.lock().unwrap().remove(&id);
+            sqlx::query("UPDATE approvals SET decision = 'expired', decided_at = CURRENT_TIMESTAMP WHERE id = ? AND decision IS NULL").bind(id).execute(&st.db).await?;
+            Ok(false)
+        }
+    }
 }
 
 pub async fn pending(st: &State) -> Result<Vec<Value>> {
@@ -107,7 +114,7 @@ pub async fn decide(st: &State, approval_id: i64, allow: bool, remember: bool) -
         } else {
             a.approval_rules.insert(tool, "allow".into());
         }
-        store::update_permissions(&st.db, &a).await?;
+        store::update_agent(&st.db, &a).await?;
     }
     let _ = tx.send(allow); // receiver gone = run was killed
     Ok(())
@@ -119,7 +126,7 @@ mod tests {
 
     #[test]
     fn rules() {
-        let mut a = store::Agent { id: 1, name: "a".into(), role_prompt: "".into(), model_ref: "ollama:x".into(),
+        let mut a = store::Agent { id: 1, name: "a".into(), role_prompt: "".into(), model_ref: "llama:x".into(),
             folders: vec![], allowed_domains: vec!["example.com".into()], approval_rules: Default::default(), context_budget: 8_000, limits: Default::default() };
         assert_eq!(rule(&a, "write_file", &json!({}), false), Rule::Allow);
         assert_eq!(rule(&a, "shell", &json!({}), false), Rule::Ask);

@@ -63,7 +63,7 @@ pub async fn ensure(st: &Arc<State>, agent: &store::Agent, scratch: &Path) -> Re
         asking: Default::default(),
     });
     let st2 = st.clone();
-    st.sandbox.start(agent.id, &agent.folders, scratch, Some(move |ip: IpAddr| async move {
+    st.sandbox.start(agent.id, &agent.folders, scratch, (agent.limits.cpus, agent.limits.memory_mb), Some(move |ip: IpAddr| async move {
         let l = TcpListener::bind((ip, 0)).await.with_context(|| format!("proxy can't listen on {ip}"))?;
         let port = l.local_addr()?.port();
         Ok((port, token, tokio::spawn(serve(st2, l, shared)).abort_handle()))
@@ -240,8 +240,8 @@ mod tests {
     async fn allows_asks_and_blocks() {
         use crate::{sandbox::Sandbox, secrets::Vault};
         let tmp = tempfile::tempdir().unwrap();
-        let st = Arc::new(State::new(tmp.path().to_path_buf(), String::new(), String::new(), Sandbox::detect(), Vault::File(tmp.path().join("keys"))).await.unwrap());
-        let a = store::Agent { id: 0, name: "t".into(), role_prompt: "".into(), model_ref: "ollama:x".into(), folders: vec![],
+        let st = Arc::new(State::new(tmp.path().to_path_buf(), String::new(), Sandbox::detect(), Vault::File(tmp.path().join("keys"))).await.unwrap());
+        let a = store::Agent { id: 0, name: "t".into(), role_prompt: "".into(), model_ref: "llama:x".into(), folders: vec![],
             allowed_domains: vec!["localhost".into()], approval_rules: Default::default(), context_budget: 8_000, limits: Default::default() };
         let id = store::create_agent(&st.db, &a).await.unwrap();
         // an "upstream" on loopback, reachable only because `localhost` is allowlisted verbatim
@@ -299,8 +299,8 @@ mod tests {
         use crate::{sandbox::Sandbox, secrets::Vault};
         use std::time::Duration;
         let tmp = tempfile::tempdir().unwrap();
-        let st = Arc::new(State::new(tmp.path().to_path_buf(), String::new(), String::new(), Sandbox::detect(), Vault::File(tmp.path().join("keys"))).await.unwrap());
-        let mk = |domains: &[&str]| store::Agent { id: 0, name: "n".into(), role_prompt: "".into(), model_ref: "ollama:x".into(),
+        let st = Arc::new(State::new(tmp.path().to_path_buf(), String::new(), Sandbox::detect(), Vault::File(tmp.path().join("keys"))).await.unwrap());
+        let mk = |domains: &[&str]| store::Agent { id: 0, name: "n".into(), role_prompt: "".into(), model_ref: "llama:x".into(),
             folders: vec![], allowed_domains: domains.iter().map(|d| d.to_string()).collect(), approval_rules: Default::default(), context_budget: 8_000, limits: Default::default() };
         let mut open = mk(&policy::PACKAGE_REGISTRIES);
         open.allowed_domains.push("example.com".into());

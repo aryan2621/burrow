@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
+#[cfg(target_os = "macos")]
+use tauri::image::Image;
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
@@ -35,7 +37,7 @@ async fn open() -> std::io::Result<Box<dyn Conn>> {
 
 /// Start burrowd detached from the app so it keeps running after the app quits.
 /// shortcut: looks next to the app binary or on PATH; replace with launchd/systemd/service install (phase 3).
-fn spawn_daemon() {
+fn spawn_daemon() -> bool {
     let exe = if cfg!(windows) { "burrowd.exe" } else { "burrowd" };
     let bin = std::env::var_os("BURROW_DAEMON").map(PathBuf::from).unwrap_or_else(|| {
         let sibling = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.join(exe)));
@@ -49,17 +51,18 @@ fn spawn_daemon() {
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     #[cfg(windows)]
     std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x8 | 0x200); // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-    if let Err(e) = cmd.spawn() {
-        eprintln!("could not start {}: {e}", bin.display());
-    }
+    cmd.spawn().map_err(|e| eprintln!("could not start {}: {e}", bin.display())).is_ok()
 }
 
 async fn connect() -> Result<Box<dyn Conn>, String> {
     if let Ok(s) = open().await {
         return Ok(s);
     }
-    spawn_daemon();
-    for _ in 0..50 {
+    if !spawn_daemon() {
+        return Err("burrowd could not be started".into());
+    }
+    // a first start can sit on a keychain prompt until the user answers it
+    for _ in 0..900 {
         tokio::time::sleep(Duration::from_millis(100)).await;
         if let Ok(s) = open().await {
             return Ok(s);
@@ -156,8 +159,14 @@ pub fn run() {
         .setup(|app| {
             let open = MenuItem::with_id(app, "open", "Open Burrow", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Burrow (agents keep running)", true, None::<&str>)?;
+            // macOS: a monochrome template mark that follows the menu bar; elsewhere the coloured app icon (a black mark would vanish on dark taskbars)
+            #[cfg(target_os = "macos")]
+            let icon = Image::new(include_bytes!("../icons/tray.rgba"), 44, 44);
+            #[cfg(not(target_os = "macos"))]
+            let icon = app.default_window_icon().expect("bundle icon").clone();
             TrayIconBuilder::new()
-                .icon(app.default_window_icon().expect("bundle icon").clone())
+                .icon(icon)
+                .icon_as_template(cfg!(target_os = "macos"))
                 .tooltip("Burrow")
                 .menu(&Menu::with_items(app, &[&open, &quit])?)
                 .on_menu_event(|app, e| match e.id.as_ref() {

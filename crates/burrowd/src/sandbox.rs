@@ -105,6 +105,11 @@ impl Sandbox {
         Sandbox { bin, image, started: Default::default() }
     }
 
+    /// "vm" when each agent gets its own VM (Apple container); "container" shares the host kernel.
+    pub fn isolation(&self) -> &'static str {
+        if self.bin.as_deref() == Some("container") { "vm" } else { "container" }
+    }
+
     fn name(agent_id: i64) -> String {
         format!("burrow-agent-{agent_id}")
     }
@@ -139,18 +144,18 @@ impl Sandbox {
     /// Start the agent's container. Without `proxy` it has no network at all. With it, the
     /// container gets its own internal network and `proxy` is called with the host address
     /// to listen on.
-    pub async fn start<F, Fut>(&self, agent_id: i64, folders: &[std::path::PathBuf], scratch: &Path, proxy: Option<F>) -> Result<()>
+    pub async fn start<F, Fut>(&self, agent_id: i64, folders: &[std::path::PathBuf], scratch: &Path, size: (i64, i64), proxy: Option<F>) -> Result<()>
     where F: FnOnce(IpAddr) -> Fut, Fut: Future<Output = Result<Proxy>> {
         let bin = self.bin()?;
         self.remove(bin, agent_id).await;
-        let res = self.start_inner(bin, agent_id, folders, scratch, proxy).await;
+        let res = self.start_inner(bin, agent_id, folders, scratch, size, proxy).await;
         if res.is_err() {
             self.remove(bin, agent_id).await;
         }
         res
     }
 
-    async fn start_inner<F, Fut>(&self, bin: &str, agent_id: i64, folders: &[std::path::PathBuf], scratch: &Path, proxy: Option<F>) -> Result<()>
+    async fn start_inner<F, Fut>(&self, bin: &str, agent_id: i64, folders: &[std::path::PathBuf], scratch: &Path, size: (i64, i64), proxy: Option<F>) -> Result<()>
     where F: FnOnce(IpAddr) -> Fut, Fut: Future<Output = Result<Proxy>> {
         let net = if proxy.is_some() {
             run_ok(Command::new(bin).args(["network", "create", "--internal", &Self::net(agent_id)]), "creating the sandbox network").await?;
@@ -159,10 +164,10 @@ impl Sandbox {
             "none".into()
         };
         let mut cmd = Command::new(bin);
-        cmd.args(["run", "-d", "--name", &Self::name(agent_id), "--network", &net, "--cpus", "2", "--memory", "2048M"]);
+        cmd.args(["run", "-d", "--name", &Self::name(agent_id), "--network", &net, "--cpus", &size.0.to_string(), "--memory", &format!("{}M", size.1)]);
         if bin != "container" {
             // shared-kernel runtimes: drop what a VM would have isolated anyway
-            cmd.args(["--cap-drop", "ALL", "--security-opt", "no-new-privileges"]);
+            cmd.args(["--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512"]);
         }
         for f in folders {
             cmd.args(["-v", &format!("{}:{}:ro", f.display(), inside(f))]);
@@ -284,7 +289,7 @@ mod tests {
         std::fs::write(ro.join("f"), "hi").unwrap();
         let id = 900_000 + std::process::id() as i64;
         type NoProxy = fn(IpAddr) -> std::future::Ready<Result<Proxy>>;
-        sb.start(id, &[ro.clone()], &scratch, None::<NoProxy>).await.unwrap();
+        sb.start(id, &[ro.clone()], &scratch, (2, 2048), None::<NoProxy>).await.unwrap();
         let run = |c: String| { let (scratch, sb) = (scratch.clone(), &sb);
             async move { sb.exec(id, &scratch, &c, Duration::from_secs(5)).await.unwrap() } };
 

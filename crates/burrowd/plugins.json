@@ -1,0 +1,11 @@
+[
+  {"id": "github", "name": "GitHub", "description": "Issues, pull requests, code search and repos (GitHub's own remote MCP server).",
+   "transport": "http", "url": "https://api.githubcopilot.com/mcp/", "hosts": ["api.githubcopilot.com"], "auth": "key",
+   "secret": {"name": "github", "hint": "GitHub personal access token", "header": "Authorization: Bearer {}"}},
+  {"id": "git", "name": "Git", "description": "Read and change local git repositories in the agent's folders (runs in the sandbox).",
+   "transport": "stdio", "command": ["uvx", "mcp-server-git"], "hosts": [], "auth": "none"},
+  {"id": "fetch", "name": "Web fetch", "description": "Fetch a page and turn it into markdown (runs in the sandbox).",
+   "transport": "stdio", "command": ["uvx", "mcp-server-fetch"], "hosts": [], "auth": "none"},
+  {"id": "notion", "name": "Notion", "description": "Search and edit pages (Notion's remote MCP server). Opens your browser to sign in.",
+   "transport": "http", "url": "https://mcp.notion.com/mcp", "hosts": ["mcp.notion.com"], "auth": "oauth"}
+]

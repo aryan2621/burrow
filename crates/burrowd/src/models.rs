@@ -4,11 +4,11 @@ use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use crate::secrets::Vault;
 
-/// Split `"ollama:qwen3:8b"` into `("ollama", "qwen3:8b")`.
+/// Split `"llama:qwen3-8b"` into `("llama", "qwen3-8b")`.
 pub fn parse_ref(model_ref: &str) -> Result<(&str, &str)> {
     match model_ref.split_once(':') {
-        Some((b @ ("ollama" | "llama" | "anthropic" | "openai"), m)) if !m.is_empty() => Ok((b, m)),
-        _ => bail!("model_ref must be `ollama:<name>`, `llama:<name>`, `anthropic:<name>` or `openai:<name>`"),
+        Some((b @ ("llama" | "anthropic" | "openai" | "gemini" | "custom"), m)) if !m.is_empty() => Ok((b, m)),
+        _ => bail!("model_ref must be `llama:<name>`, `anthropic:<name>`, `openai:<name>`, `gemini:<name>` or `custom:<name>`"),
     }
 }
 
@@ -46,16 +46,25 @@ pub fn cost((input, output): (f64, f64), usage: &Value) -> f64 {
 }
 
 pub fn is_cloud(model_ref: &str) -> bool {
-    model_ref.starts_with("anthropic:") || model_ref.starts_with("openai:")
+    PROVIDERS.iter().any(|p| model_ref.strip_prefix(p).is_some_and(|r| r.starts_with(':')))
 }
 
 const ANTHROPIC: &str = "https://api.anthropic.com/v1";
+/// Google's OpenAI-compatible endpoint, so Gemini goes through the same client as OpenAI.
+const GEMINI: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
+/// Cloud providers. `openai` and `custom` take a base URL; `custom` is any other OpenAI-compatible API.
+pub const PROVIDERS: [&str; 4] = ["anthropic", "openai", "gemini", "custom"];
 
 /// Cloud provider `(base_url, api_key)`; `None` until a key is set (cloud is off by default).
 pub async fn provider(db: &SqlitePool, vault: &Vault, name: &str) -> Result<Option<(String, String)>> {
     let Some(key) = vault.get(&format!("provider-{name}")).await? else { return Ok(None) };
     let base = match name {
         "anthropic" => ANTHROPIC.to_string(),
+        "gemini" => GEMINI.to_string(),
+        "custom" => match sqlx::query_scalar("SELECT value FROM settings WHERE key = 'custom_base_url'").fetch_optional(db).await? {
+            Some(u) => u,
+            None => return Ok(None), // no URL yet: not usable
+        },
         _ => sqlx::query_scalar("SELECT value FROM settings WHERE key = 'openai_base_url'").fetch_optional(db).await?
             .unwrap_or_else(|| "https://api.openai.com/v1".into()),
     };
@@ -65,21 +74,22 @@ pub async fn provider(db: &SqlitePool, vault: &Vault, name: &str) -> Result<Opti
 /// `providers.set`: a string sets, null clears, a missing field is left alone.
 pub async fn configure(db: &SqlitePool, vault: &Vault, p: &Value) -> Result<()> {
     let name = p["provider"].as_str().unwrap_or("");
-    anyhow::ensure!(matches!(name, "anthropic" | "openai"), "provider must be `anthropic` or `openai`");
+    anyhow::ensure!(PROVIDERS.contains(&name), "provider must be one of {}", PROVIDERS.join(", "));
+    let url_key = format!("{name}_base_url");
     match &p["api_key"] {
         Value::String(k) => vault.set(&format!("provider-{name}"), k.trim()).await?,
         Value::Null if p.get("api_key").is_some() => vault.delete(&format!("provider-{name}")).await?,
         _ => {}
     }
     match &p["base_url"] {
-        Value::String(u) if name == "openai" => {
+        Value::String(u) if matches!(name, "openai" | "custom") => {
             let parsed = url::Url::parse(u).context("bad base URL")?;
             anyhow::ensure!(matches!(parsed.scheme(), "http" | "https"), "base URL must be http(s)");
-            sqlx::query("INSERT INTO settings (key, value) VALUES ('openai_base_url', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
-                .bind(u.trim_end_matches('/')).execute(db).await?;
+            sqlx::query("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+                .bind(&url_key).bind(u.trim_end_matches('/')).execute(db).await?;
         }
         Value::Null if p.get("base_url").is_some() => {
-            sqlx::query("DELETE FROM settings WHERE key = 'openai_base_url'").execute(db).await?;
+            sqlx::query("DELETE FROM settings WHERE key = ?").bind(&url_key).execute(db).await?;
         }
         _ => {}
     }
@@ -88,7 +98,7 @@ pub async fn configure(db: &SqlitePool, vault: &Vault, p: &Value) -> Result<()> 
 
 pub async fn providers(db: &SqlitePool, vault: &Vault) -> Result<Value> {
     let mut out = serde_json::Map::new();
-    for name in ["anthropic", "openai"] {
+    for name in PROVIDERS {
         out.insert(name.into(), match provider(db, vault, name).await? {
             Some((base, _)) => json!({"configured": true, "base_url": base}),
             None => json!({"configured": false}),
@@ -104,32 +114,28 @@ fn anthropic_headers(req: reqwest::RequestBuilder, key: &str) -> reqwest::Reques
 /// Models of each configured cloud provider, as model refs. Unreachable providers are skipped.
 pub async fn cloud(http: &reqwest::Client, db: &SqlitePool, vault: &Vault) -> Vec<String> {
     let mut out = vec![];
-    for name in ["anthropic", "openai"] {
+    for name in PROVIDERS {
         let Ok(Some((base, key))) = provider(db, vault, name).await else { continue };
         let req = http.get(format!("{base}/models")).timeout(std::time::Duration::from_secs(10));
         let req = if name == "anthropic" { anthropic_headers(req, &key) } else { req.bearer_auth(&key) };
         let Ok(res) = req.send().await else { continue };
         let Ok(v) = res.json::<Value>().await else { continue };
         for m in v["data"].as_array().into_iter().flatten() {
-            out.extend(m["id"].as_str().map(|n| format!("{name}:{n}")));
+            // Gemini lists ids as `models/gemini-…`
+            out.extend(m["id"].as_str().map(|n| format!("{name}:{}", n.trim_start_matches("models/"))));
         }
     }
     out
 }
 
-/// Ollama models plus downloaded built-in models (or, for an external llama-server, what it
-/// has loaded). Unreachable backends are skipped.
-pub async fn list(http: &reqwest::Client, ollama: &str, llama: &crate::llama::Llama, home: &std::path::Path) -> Vec<String> {
+/// Downloaded built-in models (or, for an external llama-server, what it has loaded; skipped
+/// when it's unreachable).
+pub async fn list(http: &reqwest::Client, llama: &crate::llama::Llama, home: &std::path::Path) -> Vec<String> {
     let get = |url: String| async move {
         let v: Value = http.get(url).send().await.ok()?.json().await.ok()?;
         Some(v)
     };
     let mut out = vec![];
-    if let Some(v) = get(format!("{ollama}/api/tags")).await {
-        for m in v["models"].as_array().into_iter().flatten() {
-            out.extend(m["name"].as_str().map(|n| format!("ollama:{n}")));
-        }
-    }
     if llama.managed() {
         let installed = crate::hardware::catalog().into_iter().filter(|m| crate::download::installed(home, m));
         out.extend(installed.map(|m| format!("llama:{}", m.id)));
@@ -139,21 +145,6 @@ pub async fn list(http: &reqwest::Client, ollama: &str, llama: &crate::llama::Ll
         }
     }
     out
-}
-
-pub async fn pull(http: &reqwest::Client, ollama: &str, name: &str) -> Result<()> {
-    let v: Value = http
-        .post(format!("{ollama}/api/pull"))
-        .json(&json!({"model": name, "stream": false}))
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    match v["error"].as_str() {
-        Some(e) => bail!("{e}"),
-        None => Ok(()),
-    }
 }
 
 /// One streamed `<base>/chat/completions` call (`base` ends in `/v1`). Calls `on_delta` for

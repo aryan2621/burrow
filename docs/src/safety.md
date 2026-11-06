@@ -2,7 +2,7 @@
 
 - **Folders:** file tools resolve symlinks and refuse anything outside the agent's folders and
   scratch folder.
-- **Sandbox:** one container per agent (2 CPU, 2 GB). Your folders are mounted read-only; only
+- **Sandbox:** one container per agent (2 CPU, 2 GB by default, set per agent). Your folders are mounted read-only; only
   the journaled file tools change host files.
 - **Network:** the sandbox has no direct route out. Its only exit is the daemon's proxy, which
   enforces the agent's domain allowlist, refuses private and loopback addresses unless you
@@ -13,10 +13,12 @@
   Timeline shows whether it's intact.
 - **Undo:** writes and deletes snapshot first. Undo refuses if the file changed since, unless you
   force it. Shell commands and web requests can't be undone and are marked so.
-- **Kill switch:** stops the run, denies its pending approvals and removes its sandbox.
+- **Kill switch:** stops the run, denies its pending approvals, suspends its secrets and removes its sandbox. Unanswered approvals expire after 30 minutes.
 - **Untrusted content:** fetched pages and search results are wrapped in `<untrusted>` tags, and
-  the model is told never to follow instructions inside them. Once a run has read web or MCP
-  content, every write, delete, shell command or note for the rest of that run asks you first.
-- **Runaway limits:** a run stops after 10 steps, 30 minutes or 32,000 generated tokens.
+  the model is told never to follow instructions inside them. Once a run has read web, email or
+  MCP content, every delete, shell command, note, email send or MCP action for the rest of that run
+  asks you first. File writes, email moves and drafts don't: they stay on your machine or mailbox
+  and undo from the Timeline.
+- **Runaway limits:** by default a run stops after 10 steps, 30 minutes or 32,000 generated tokens (editable per agent; the inbox agent gets 60 steps).
 
 See `SECURITY.md` in the repository for what counts as a vulnerability.

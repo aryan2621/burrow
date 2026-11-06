@@ -1,0 +1,14 @@
+name: Docs
+on:
+  push:
+    branches: [main]
+    paths: [docs/**]
+  pull_request:
+    paths: [docs/**]
+jobs:
+  book:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo install mdbook --locked
+      - run: mdbook build docs

@@ -40,13 +40,18 @@ pub fn start(st: &Arc<State>, id: &str) -> Result<()> {
     let h = tokio::spawn(async move {
         let url = format!("https://huggingface.co/{}/resolve/main/{}", m.repo, m.file);
         let mut last = 0u64;
-        let res = fetch(&st2.http, &url, &dir(&st2.home), &m.file, m.size, &m.sha256, |done, total| {
-            // about one event per percent
-            if done - last >= total / 100 || done == total {
-                last = done;
-                st2.emit("models.progress", json!({"id": m.id, "done": done, "total": total}));
-            }
-        }).await;
+        // the model is useless without the runtime, so a download leaves both in place
+        let res: Result<()> = async {
+            crate::llama::ensure_server(&st2.http, &st2.home).await?;
+            fetch(&st2.http, &url, &dir(&st2.home), &m.file, m.size, &m.sha256, |done, total| {
+                // about one event per percent
+                if done - last >= total / 100 || done == total {
+                    last = done;
+                    st2.emit("models.progress", json!({"id": m.id, "done": done, "total": total}));
+                }
+            }).await?;
+            Ok(())
+        }.await;
         st2.downloads.0.lock().unwrap().remove(&m.id);
         match res {
             Ok(_) => st2.emit("models.downloaded", json!({"id": m.id})),
@@ -78,6 +83,9 @@ fn hash_file(path: &Path, h: &mut Sha256) -> Result<u64> {
     }
 }
 
+/// A download that gets no bytes for this long fails (the `.part` file stays, so Download resumes it).
+const STALL: std::time::Duration = std::time::Duration::from_secs(60);
+
 pub async fn fetch(http: &reqwest::Client, url: &str, dir: &Path, file: &str, size: u64, sha256: &str,
                    mut progress: impl FnMut(u64, u64)) -> Result<PathBuf> {
     let dest = dir.join(file);
@@ -102,7 +110,7 @@ pub async fn fetch(http: &reqwest::Client, url: &str, dir: &Path, file: &str, si
         if done > 0 {
             req = req.header("Range", format!("bytes={done}-"));
         }
-        let res = req.send().await?.error_for_status()?;
+        let res = tokio::time::timeout(STALL, req.send()).await.context("the server didn't answer in 60 s")??.error_for_status()?;
         let resumed = res.status() == reqwest::StatusCode::PARTIAL_CONTENT;
         if !resumed {
             // server ignored the range: start over
@@ -111,7 +119,7 @@ pub async fn fetch(http: &reqwest::Client, url: &str, dir: &Path, file: &str, si
         }
         let mut out = std::fs::OpenOptions::new().create(true).write(true).append(resumed).truncate(!resumed).open(&part)?;
         let mut body = res.bytes_stream();
-        while let Some(chunk) = body.next().await {
+        while let Some(chunk) = tokio::time::timeout(STALL, body.next()).await.context("download stalled for 60 s; press Download to resume")? {
             let chunk = chunk?;
             out.write_all(&chunk)?;
             h.update(&chunk);

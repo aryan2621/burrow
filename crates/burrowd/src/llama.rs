@@ -3,6 +3,7 @@
 //! that needs a different model waits for in-flight calls, then the server restarts.
 use crate::{download, hardware};
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
@@ -40,6 +41,41 @@ pub fn find_server(home: &Path) -> Option<PathBuf> {
     }
     dirs.extend(std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default());
     dirs.into_iter().map(|d| d.join(exe)).find(|p| p.is_file())
+}
+
+const PINS: &str = include_str!("../llama-pins.txt");
+
+/// `find_server`, or else download the pinned, checksummed llama.cpp build into `<home>/llama`.
+/// Unpacks with the system `tar` (macOS, Linux and Windows 10+ all read their own archives).
+pub async fn ensure_server(http: &reqwest::Client, home: &Path) -> Result<PathBuf> {
+    if let Some(p) = find_server(home) {
+        return Ok(p);
+    }
+    let tag = PINS.lines().next().context("empty llama-pins.txt")?;
+    let key = format!("{}/{}/cpu", std::env::consts::OS, std::env::consts::ARCH);
+    let (asset, sum) = PINS.lines().skip(1).find_map(|l| {
+        let f: Vec<_> = l.split_whitespace().collect();
+        (f.len() == 3 && f[0] == key).then(|| (f[1], f[2]))
+    }).with_context(|| format!("no pinned llama.cpp build for {key}; install llama-server and set BURROW_LLAMA_SERVER"))?;
+    let file = format!("llama-{tag}-bin-{asset}");
+    let bytes = http.get(format!("https://github.com/ggml-org/llama.cpp/releases/download/{tag}/{file}"))
+        .send().await?.error_for_status()?.bytes().await.context("downloading llama.cpp")?;
+    let got: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    anyhow::ensure!(got == sum, "checksum mismatch for {file}: {got}");
+    let tmp = home.join("llama.tmp");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("x"))?;
+    std::fs::write(tmp.join(&file), &bytes)?;
+    let ok = Command::new("tar").args(["-xf", &file, "-C", "x"]).current_dir(&tmp).status().await.context("running tar")?.success();
+    anyhow::ensure!(ok, "couldn't unpack {file}");
+    // archives hold either a top-level llama-<tag>/ folder or the files directly
+    let inner = tmp.join("x").join(format!("llama-{tag}"));
+    let src = if inner.is_dir() { inner } else { tmp.join("x") };
+    let dest = home.join("llama");
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::rename(src, &dest)?;
+    let _ = std::fs::remove_dir_all(&tmp);
+    find_server(home).context("llama-server missing from the downloaded archive")
 }
 
 impl Llama {
@@ -80,7 +116,7 @@ impl Llama {
     async fn start(&self, http: &reqwest::Client, port: u16, id: &str) -> Result<Loaded> {
         let m = hardware::model(id)?;
         anyhow::ensure!(download::installed(&self.home, &m), "{} isn't downloaded yet; download it in Settings → Models", m.name);
-        let bin = find_server(&self.home).context("llama-server not found; it ships with the app (dev: scripts/fetch-llama.sh)")?;
+        let bin = ensure_server(http, &self.home).await?;
         let log = std::fs::File::create(self.home.join("llama-server.log"))?;
         let total_ctx = (m.ctx * PARALLEL as u64).to_string();
         let mut child = Command::new(&bin)
@@ -145,19 +181,19 @@ http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
         std::env::set_var("BURROW_LLAMA_SERVER", fake_server(&home));
         let l = Llama::new(home.clone(), String::new()).unwrap();
         let http = reqwest::Client::new();
-        let err = l.use_model(&http, "qwen3-4b").await.err().unwrap();
+        let err = l.use_model(&http, "qwen3.5-4b").await.err().unwrap();
         assert!(format!("{err:#}").contains("isn't downloaded"), "{err:#}");
 
         std::fs::create_dir_all(download::dir(&home)).unwrap();
-        for id in ["qwen3-4b", "qwen3-8b"] {
+        for id in ["qwen3.5-4b", "qwen3-8b"] {
             std::fs::write(download::dir(&home).join(hardware::model(id).unwrap().file), "").unwrap();
         }
         let who = |l: &Llama| { let (http, url) = (http.clone(), l.url.clone());
             async move { http.get(format!("{url}/health")).send().await.unwrap().text().await.unwrap() } };
-        drop(l.use_model(&http, "qwen3-4b").await.unwrap());
-        assert_eq!(who(&l).await, "qwen3-4b");
+        drop(l.use_model(&http, "qwen3.5-4b").await.unwrap());
+        assert_eq!(who(&l).await, "qwen3.5-4b");
         let pid = l.loaded.read().await.as_ref().unwrap().child.lock().unwrap().id();
-        drop(l.use_model(&http, "qwen3-4b").await.unwrap());
+        drop(l.use_model(&http, "qwen3.5-4b").await.unwrap());
         assert_eq!(l.loaded.read().await.as_ref().unwrap().child.lock().unwrap().id(), pid, "same model reuses the server");
         drop(l.use_model(&http, "qwen3-8b").await.unwrap());
         assert_eq!(who(&l).await, "qwen3-8b");

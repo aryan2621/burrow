@@ -1,102 +1,154 @@
 import { useEffect, useState } from "react";
-import { Agent, Routine, Schedule, pickFolder, rpc, ui } from "./rpc";
+import { CalendarClockIcon, ClockIcon, FolderOpenIcon, FolderSyncIcon, MailIcon, PlayIcon, PlusIcon, RepeatIcon, Trash2Icon, WorkflowIcon } from "lucide-react";
+import { Agent, Routine, Schedule, confirmAction, pickFolder, rpc } from "./rpc";
+import { Row, Section, Status } from "@/components/settings";
+import { EmptyState } from "@/components/panel";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemMedia, ItemTitle } from "@/components/ui/item";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
-const HINT = { cron: "0 9 * * 1-5  (min hour day month weekday)", interval: "3600  (seconds, at least 60)", file: "a folder or file inside the agent's folders",
-  email: "email connection name (new mail in INBOX)", calendar: "calendar connection name (events starting in 15 min)",
-  github: "github connection name, then owner/repo (new issues)" };
+const KINDS: { kind: Schedule["kind"]; label: string; icon: React.ReactNode; hint: string }[] = [
+  { kind: "cron", label: "At times", icon: <ClockIcon />, hint: "0 9 * * 1-5  (min hour day month weekday)" },
+  { kind: "interval", label: "Repeat", icon: <RepeatIcon />, hint: "3600  (seconds, at least 60)" },
+  { kind: "file", label: "Files change", icon: <FolderSyncIcon />, hint: "a folder or file inside the agent's folders" },
+  { kind: "email", label: "New email", icon: <MailIcon />, hint: "email connection name (new mail in INBOX)" },
+];
+const KIND = Object.fromEntries(KINDS.map((k) => [k.kind, k])) as Record<Schedule["kind"], (typeof KINDS)[number]>;
+const PRESETS: Partial<Record<Schedule["kind"], [string, string][]>> = {
+  cron: [["Weekdays 9:00", "0 9 * * 1-5"], ["Daily 18:00", "0 18 * * *"], ["Hourly", "0 * * * *"], ["Mondays 8:00", "0 8 * * 1"]],
+  interval: [["15 min", "900"], ["1 hour", "3600"], ["6 hours", "21600"]],
+};
+const PROMPT = "prompt";
+const ON = "data-[state=on]:bg-accent data-[state=on]:font-medium";
 
-/** Cron, interval and file-change schedules; runs happen in the background, even with the window closed. */
-export default function Schedules({ agent }: { agent: Agent }) {
-  const [list, setList] = useState<Schedule[]>([]);
-  const [error, setError] = useState("");
-  const [f, setF] = useState({ kind: "cron" as Schedule["kind"], spec: "", prompt: "", routine_id: null as number | null });
+function useAutomation(agent: Agent) {
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [routines, setRoutines] = useState<Routine[]>([]);
-
+  const [msg, setMsg] = useState("");
   const load = () => {
-    rpc<Schedule[]>("schedules.list", { agent_id: agent.id }).then(setList, (e) => setError(String(e)));
-    rpc<Routine[]>("routines.list", { agent_id: agent.id }).then(setRoutines, (e) => setError(String(e)));
+    rpc<Schedule[]>("schedules.list", { agent_id: agent.id }).then(setSchedules, (e) => setMsg(String(e)));
+    rpc<Routine[]>("routines.list", { agent_id: agent.id }).then(setRoutines, (e) => setMsg(String(e)));
   };
   useEffect(() => void load(), [agent.id]);
-
-  const call = (method: string, params: object) => {
-    setError("");
-    return rpc(method, params).then(load, (e) => { setError(String(e)); throw e; });
+  const call = (method: string, params: object, done = "") => {
+    setMsg("");
+    return rpc(method, params).then(() => { setMsg(done); load(); }, (e) => { setMsg(String(e)); throw e; });
   };
+  return { schedules, routines, msg, call };
+}
+
+/** Cron, interval, file-change and email schedules; runs happen in the background, even with the window closed. */
+export function SchedulesPage({ agent }: { agent: Agent }) {
+  const { schedules, routines, msg, call } = useAutomation(agent);
+  const [f, setF] = useState({ kind: "cron" as Schedule["kind"], spec: "", prompt: "", routine_id: null as number | null });
   const add = (e: React.FormEvent) => {
     e.preventDefault();
-    call("schedules.add", { agent_id: agent.id, ...f }).then(() => setF({ ...f, spec: "", prompt: "", routine_id: null }), () => {});
+    call("schedules.add", { agent_id: agent.id, ...f }, "Schedule added").then(() => setF({ ...f, spec: "", prompt: "", routine_id: null }), () => {});
   };
   const when = (s: Schedule) =>
-    s.kind === "file" ? "on change" : ["email", "calendar", "github"].includes(s.kind) ? "checks every minute" : s.next_run_at ? `next ${new Date(s.next_run_at * 1000).toLocaleString()}` : "";
+    s.kind === "file" ? "Runs on change" : s.kind === "email" ? "Checks every minute" : s.next_run_at ? `Next: ${new Date(s.next_run_at * 1000).toLocaleString()}` : "";
 
   return (
-    <div className="h-full max-w-2xl space-y-4 overflow-y-auto p-4">
-      <section className="space-y-2">
-        <h3 className="font-semibold">Routines</h3>
-        {routines.length === 0 && <p className="text-sm text-stone-500">Save a finished run as a routine from the Timeline to reuse it here.</p>}
-        {routines.map((r) => (
-          <div key={r.id} className="flex items-center justify-between gap-2 rounded border border-stone-200 p-2 text-sm dark:border-stone-700">
-            <span className="min-w-0">
-              <span className="font-semibold">{r.name}</span>{" "}
-              <span className="text-stone-500">· tools: {r.tools.join(", ") || "none"}{r.approved.length > 0 && ` · pre-approved: ${r.approved.join(", ")}`}</span>
-            </span>
-            <span className="flex shrink-0 gap-2">
-              <button className={ui.button} onClick={() => call("routines.run", { id: r.id }).catch(() => {})}>Run now</button>
-              <button className={ui.button} onClick={() => confirm(`Delete routine ${r.name}?`) && call("routines.delete", { id: r.id }).catch(() => {})}>Delete</button>
-            </span>
-          </div>
+    <>
+      <Section title="Active" description="They run in the background, even with the window closed, and wait while the battery is low.">
+        {schedules.length === 0 && <EmptyState icon={<CalendarClockIcon />} title="No schedules yet">Add one below to have {agent.name} work on its own.</EmptyState>}
+        <ItemGroup className="gap-2 py-2">
+        {schedules.map((s) => (
+          <Item key={s.id} variant="outline" size="sm" className={`bg-card ${s.enabled ? "" : "opacity-60"}`}>
+            <ItemMedia variant="icon">{KIND[s.kind].icon}</ItemMedia>
+            <ItemContent className="min-w-0">
+              <ItemTitle className="flex-wrap">{KIND[s.kind].label}<code className="rounded bg-secondary px-1.5 py-0.5 text-xs font-normal">{s.spec}</code></ItemTitle>
+              <ItemDescription>{s.routine_id !== null ? `Routine: ${routines.find((r) => r.id === s.routine_id)?.name ?? s.routine_id}` : s.prompt}</ItemDescription>
+              <span className="text-xs text-muted-foreground">{s.enabled ? when(s) : "Paused"}</span>
+            </ItemContent>
+            <ItemActions>
+            <Switch aria-label={s.enabled ? "Pause schedule" : "Resume schedule"} checked={s.enabled}
+              onCheckedChange={(enabled) => call("schedules.update", { id: s.id, enabled }).catch(() => {})} />
+            <Button size="icon-sm" variant="ghost" aria-label="Delete schedule" className="hover:text-destructive"
+              onClick={async () => (await confirmAction("Delete this schedule?")) && call("schedules.delete", { id: s.id }).catch(() => {})}><Trash2Icon /></Button>
+            </ItemActions>
+          </Item>
         ))}
-      </section>
-      <h3 className="font-semibold">Schedules</h3>
-      {list.length === 0 && <p className="text-sm text-stone-500">No schedules yet.</p>}
-      <ul className="space-y-2">
-        {list.map((s) => (
-          <li key={s.id} className="rounded border border-stone-200 p-2 text-sm dark:border-stone-700">
-            <div className="flex items-center justify-between gap-2">
-              <span><span className="font-mono">{s.kind}</span> {s.spec} <span className="text-stone-500">· {s.enabled ? when(s) : "paused"}</span>
-                {s.routine_id !== null && <span className="text-stone-500"> · routine {routines.find((r) => r.id === s.routine_id)?.name ?? s.routine_id}</span>}</span>
-              <span className="flex shrink-0 gap-2">
-                <button className={ui.button} onClick={() => call("schedules.update", { id: s.id, enabled: !s.enabled }).catch(() => {})}>
-                  {s.enabled ? "Pause" : "Resume"}
+        </ItemGroup>
+      </Section>
+
+      <form onSubmit={add}>
+        <Section title="New schedule">
+          <Row label="Trigger" detail="What starts a run." stack>
+            <ToggleGroup type="single" variant="outline" size="sm" aria-label="Trigger" className="w-full"
+              value={f.kind} onValueChange={(k) => k && setF({ ...f, kind: k as Schedule["kind"], spec: "" })}>
+              {KINDS.map((k) => <ToggleGroupItem key={k.kind} value={k.kind} className={`flex-1 gap-1.5 text-xs ${ON}`}>{k.icon}{k.label}</ToggleGroupItem>)}
+            </ToggleGroup>
+          </Row>
+          <Row label="When" stack detail={PRESETS[f.kind] && (
+            <span className="mt-1 flex flex-wrap gap-1.5">
+              {PRESETS[f.kind]!.map(([label, spec]) => (
+                <button key={spec} type="button" aria-pressed={f.spec === spec} onClick={() => setF({ ...f, spec })}
+                  className={`rounded-full border px-2.5 py-0.5 text-xs hover:bg-accent ${f.spec === spec ? "border-primary bg-accent font-medium" : "bg-card text-foreground"}`}>
+                  {label}
                 </button>
-                <button className={ui.button} onClick={() => confirm("Delete this schedule?") && call("schedules.delete", { id: s.id }).catch(() => {})}>
-                  Delete
-                </button>
-              </span>
-            </div>
-            <p className="mt-1 whitespace-pre-wrap text-stone-600 dark:text-stone-400">{s.prompt}</p>
-          </li>
-        ))}
-      </ul>
-      <form onSubmit={add} className="space-y-2 border-t border-stone-200 pt-4 dark:border-stone-700">
-        <h3 className="font-semibold">New schedule</h3>
-        <div className="flex gap-2">
-          <select aria-label="Kind" className={`${ui.input} w-36`} value={f.kind} onChange={(e) => setF({ ...f, kind: e.target.value as Schedule["kind"] })}>
-            <option value="cron">Cron</option>
-            <option value="interval">Every N seconds</option>
-            <option value="file">When files change</option>
-            <option value="email">New email</option>
-            <option value="calendar">Event soon</option>
-            <option value="github">New GitHub issue</option>
-          </select>
-          <input aria-label="When" className={ui.input} required placeholder={HINT[f.kind]} value={f.spec} onChange={(e) => setF({ ...f, spec: e.target.value })} />
-          {f.kind === "file" && (
-            <button type="button" className={ui.button} onClick={async () => { const p = await pickFolder(); if (p) setF({ ...f, spec: p }); }}>Choose…</button>
+              ))}
+            </span>
+          )}>
+            <Input aria-label="When" required className="font-mono" placeholder={KIND[f.kind].hint} value={f.spec} onChange={(e) => setF({ ...f, spec: e.target.value })} />
+            {f.kind === "file" && (
+              <Button type="button" variant="outline" onClick={async () => { const p = await pickFolder(); if (p) setF({ ...f, spec: p }); }}><FolderOpenIcon />Choose…</Button>
+            )}
+          </Row>
+          {routines.length > 0 && (
+            <Row label="Do">
+              <Select value={f.routine_id === null ? PROMPT : String(f.routine_id)}
+                onValueChange={(v) => setF({ ...f, routine_id: v === PROMPT ? null : Number(v) })}>
+                <SelectTrigger aria-label="Routine" className="w-60"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={PROMPT}>Write a task</SelectItem>
+                  {routines.map((r) => <SelectItem key={r.id} value={String(r.id)}>Routine: {r.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </Row>
           )}
+          {f.routine_id === null && (
+            <Row label="Task" detail="What the agent should do each time." stack>
+              <Textarea aria-label="Task" rows={3} required placeholder="e.g. Summarise new files in my notes folder" value={f.prompt} onChange={(e) => setF({ ...f, prompt: e.target.value })} />
+            </Row>
+          )}
+        </Section>
+        <div className="flex items-center gap-3 border-t pt-4">
+          <Button><PlusIcon />Add schedule</Button>
+          <Status msg={msg} />
         </div>
-        {routines.length > 0 && (
-          <select aria-label="Routine" className={ui.input} value={f.routine_id ?? ""} onChange={(e) => setF({ ...f, routine_id: e.target.value ? Number(e.target.value) : null })}>
-            <option value="">Write a prompt</option>
-            {routines.map((r) => <option key={r.id} value={r.id}>Run routine: {r.name}</option>)}
-          </select>
-        )}
-        {f.routine_id === null && (
-          <textarea aria-label="What the agent should do" className={ui.input} rows={3} required placeholder="What should the agent do each time?"
-            value={f.prompt} onChange={(e) => setF({ ...f, prompt: e.target.value })} />
-        )}
-        {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
-        <button className={ui.primary}>Add schedule</button>
       </form>
-    </div>
+    </>
+  );
+}
+
+/** Runs saved from the Activity tab, to run again or from a schedule. */
+export function RoutinesPage({ agent }: { agent: Agent }) {
+  const { routines, msg, call } = useAutomation(agent);
+  return (
+    <Section description="A routine replays a run that went well: same task, same tools, same approvals. Save one from a run in the Activity tab.">
+      {routines.length === 0 && <EmptyState icon={<WorkflowIcon />} title="No routines yet">Open Activity and pick “Save as routine” on a finished run.</EmptyState>}
+      <ItemGroup className="gap-2 py-2">
+      {routines.map((r) => (
+        <Item key={r.id} variant="outline" size="sm" className="bg-card">
+          <ItemMedia variant="icon"><WorkflowIcon /></ItemMedia>
+          <ItemContent className="min-w-0">
+            <ItemTitle>{r.name}</ItemTitle>
+            <ItemDescription>Tools: {r.tools.join(", ") || "none"}{r.approved.length > 0 && ` · pre-approved: ${r.approved.join(", ")}`}</ItemDescription>
+          </ItemContent>
+          <ItemActions>
+          <Button size="sm" variant="outline" onClick={() => call("routines.run", { id: r.id }, `Started ${r.name}`).catch(() => {})}><PlayIcon />Run now</Button>
+          <Button size="icon-sm" variant="ghost" aria-label={`Delete routine ${r.name}`} className="hover:text-destructive"
+            onClick={async () => (await confirmAction(`Delete routine ${r.name}?`)) && call("routines.delete", { id: r.id }).catch(() => {})}><Trash2Icon /></Button>
+          </ItemActions>
+        </Item>
+      ))}
+      </ItemGroup>
+      <Status msg={msg} />
+    </Section>
   );
 }

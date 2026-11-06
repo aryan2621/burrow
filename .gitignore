@@ -4,3 +4,4 @@ dist/
 apps/desktop/src-tauri/binaries/
 apps/desktop/src-tauri/resources/
 __pycache__/
+.impeccable/

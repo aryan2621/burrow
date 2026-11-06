@@ -144,6 +144,71 @@ pub fn snapshot(snapshots: &Path, path: &Path, after: Option<&[u8]>) -> Result<V
     Ok(json!({"path": path, "snapshot": before, "after_hash": after.map(sha256)}))
 }
 
+/// Scratch folders bigger than this aren't snapshotted before a shell command.
+const MAX_SCRATCH_SNAPSHOT: u64 = 200 * 1024 * 1024;
+
+fn dir_size(dir: &Path) -> Result<u64> {
+    let mut n = 0;
+    for e in std::fs::read_dir(dir)? {
+        let e = e?;
+        let t = e.file_type()?;
+        n += if t.is_dir() { dir_size(&e.path())? } else if t.is_file() { e.metadata()?.len() } else { 0 };
+    }
+    Ok(n)
+}
+
+// shortcut: symlinks and special files are skipped; plaintext copy like the scratch folder itself. Encrypt if scratch ever holds secrets.
+fn copy_dir(from: &Path, to: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for e in std::fs::read_dir(from)? {
+        let e = e?;
+        let t = e.file_type()?;
+        if t.is_dir() {
+            copy_dir(&e.path(), &to.join(e.file_name()))?;
+        } else if t.is_file() {
+            std::fs::copy(e.path(), to.join(e.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy the agent's scratch folder before a shell command so the run can be reverted.
+/// Returns the inverse, or None when scratch is too big to copy (the command then stays irreversible).
+pub fn snapshot_scratch(snapshots: &Path, scratch: &Path) -> Result<Option<Value>> {
+    if dir_size(scratch)? > MAX_SCRATCH_SNAPSHOT {
+        return Ok(None);
+    }
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+    prune_scratch_snapshots(snapshots, nanos);
+    let dst = snapshots.join(format!("scratch-{nanos}"));
+    copy_dir(scratch, &dst)?;
+    Ok(Some(json!({"scratch": scratch, "scratch_snapshot": dst})))
+}
+
+/// Scratch copies older than this are deleted; undoing a run that old then says the copy is gone.
+const SCRATCH_SNAPSHOT_DAYS: u128 = 7;
+
+/// Names are `scratch-<nanos since epoch>`, so age comes from the name.
+fn prune_scratch_snapshots(snapshots: &Path, now_nanos: u128) {
+    let Ok(entries) = std::fs::read_dir(snapshots) else { return };
+    for e in entries.flatten() {
+        let old = e.file_name().to_str().and_then(|n| n.strip_prefix("scratch-")).and_then(|n| n.parse::<u128>().ok())
+            .is_some_and(|t| now_nanos.saturating_sub(t) > SCRATCH_SNAPSHOT_DAYS * 86_400 * 1_000_000_000);
+        if old {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+fn restore_scratch(scratch: &Path, snap: &Path) -> Result<()> {
+    anyhow::ensure!(snap.is_dir(), "the saved copy of this folder was deleted (copies are kept {SCRATCH_SNAPSHOT_DAYS} days)");
+    for e in std::fs::read_dir(scratch)? {
+        let p = e?.path();
+        if p.is_dir() { std::fs::remove_dir_all(&p)? } else { std::fs::remove_file(&p)? }
+    }
+    copy_dir(snap, scratch)
+}
+
 fn current_hash(path: &Path) -> Result<Option<String>> {
     match std::fs::read(path) {
         Ok(b) => Ok(Some(sha256(&b))),
@@ -152,7 +217,7 @@ fn current_hash(path: &Path) -> Result<Option<String>> {
     }
 }
 
-/// `remote` is needed to undo connector actions (email, calendar, GitHub).
+/// `remote` is needed to undo connector actions (email).
 pub async fn undo(db: &SqlitePool, snapshots: &Path, remote: Option<&crate::agent::State>, action_id: i64, force: bool) -> Result<()> {
     let r = sqlx::query("SELECT a.inverse, u.action_id AS undone FROM actions a LEFT JOIN undos u ON u.action_id = a.id WHERE a.id = ?")
         .bind(action_id)
@@ -168,13 +233,18 @@ pub async fn undo(db: &SqlitePool, snapshots: &Path, remote: Option<&crate::agen
         sqlx::query("INSERT INTO undos (action_id) VALUES (?)").bind(action_id).execute(db).await?;
         return Ok(());
     }
-    if let Some(v) = inv["artifact_version_id"].as_i64() {
-        crate::artifacts::undo(db, v).await?;
+    if let Some(note) = inv["note_id"].as_i64() {
+        crate::notes::delete(db, note).await?;
         sqlx::query("INSERT INTO undos (action_id) VALUES (?)").bind(action_id).execute(db).await?;
         return Ok(());
     }
-    if let Some(note) = inv["note_id"].as_i64() {
-        crate::notes::delete(db, note).await?;
+    if let (Some(snap), Some(scratch)) = (inv["scratch_snapshot"].as_str(), inv["scratch"].as_str()) {
+        restore_scratch(Path::new(scratch), Path::new(snap))?;
+        // the container filesystem (installed packages, /tmp) goes with it: next run starts a fresh one
+        if let Some(st) = remote {
+            let agent_id: i64 = sqlx::query_scalar("SELECT agent_id FROM actions WHERE id = ?").bind(action_id).fetch_one(db).await?;
+            st.sandbox.stop(agent_id).await;
+        }
         sqlx::query("INSERT INTO undos (action_id) VALUES (?)").bind(action_id).execute(db).await?;
         return Ok(());
     }
