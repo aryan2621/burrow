@@ -20,7 +20,7 @@ The app starts `burrowd` if it isn't already running. The daemon keeps running a
 - Data: `~/.burrow/` (override with `BURROW_HOME`): `burrow.db`, `snapshots/` (undo), `scratch/<agent>/`.
 - IPC: Unix socket `~/.burrow/burrowd.sock` (0600) on macOS/Linux, named pipe `\\.\pipe\burrowd-<user>` on Windows.
 - Built-in models (llama.cpp): the daemon downloads a pinned, checksummed llama-server into `~/.burrow/llama` with your first model (the release app bundles it; `scripts/fetch-llama.sh` does it by hand). `hardware.detect` recommends a model by RAM from `crates/burrowd/models.json` (13 models in 8 / 16 / 18 / 24 / 32 GB tiers; Settings shows the ones that fit); `models.download {id}` fetches it into `~/.burrow/models` with resume and a sha256 check. Use `llama:<id>` model refs: the daemon starts llama-server on a free loopback port (`--parallel 4`, prompt cache reused per slot) and restarts it when an agent needs another model. `BURROW_LLAMA_URL` points at your own server instead.
-- CI/release: `.github/workflows/ci.yml` (3-OS daemon + desktop build), `build.yml` (every push to main or manual run: sidecar `burrowd`, bundled llama.cpp, unsigned installers as run artifacts; a `v*` tag also makes a draft release; signing secrets optional), `image.yml` (multi-arch sandbox image to GHCR).
+- CI/release: `.github/workflows/ci.yml` (3-OS daemon + desktop build), `release.yml` (on `v*` tag: sidecar `burrowd`, bundled llama.cpp, tauri-action publishes the release with installers for macOS, Linux and Windows; a tag with a `-` such as `v0.2.0-beta.1` is marked pre-release; signing secrets optional), `image.yml` (multi-arch sandbox image to GHCR).
 
 ## Daemon API (ND-JSON-RPC 2.0 over the socket)
 
