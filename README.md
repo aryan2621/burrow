@@ -1,6 +1,6 @@
 # Burrow
 
-Your private AI team, running on your machine. Spec: `../product-specs/burrow.md`. v0.1 is feature-complete; release signing waits on accounts. User docs: `docs/` (mdBook, `mdbook serve docs`). See also `SECURITY.md`, `PRIVACY.md`.
+Your private AI team, running on your machine. v0.1 is feature-complete; release signing waits on accounts. User docs: `docs/` (mdBook, `mdbook serve docs`). See also `SECURITY.md`, `PRIVACY.md`.
 
 ## Run
 
